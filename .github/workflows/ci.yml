@@ -58,7 +58,7 @@ jobs:
           DEHKHODA_BUNDLE_MODE: onedir
           DEHKHODA_BUNDLE_PROFILE: full
         run: python -m PyInstaller --noconfirm --clean --distpath dist --workpath build dehkhoda-server.spec
-      - name: Smoke: launch + health
+      - name: "Smoke: launch + health"
         working-directory: backend
         shell: bash
         run: |
