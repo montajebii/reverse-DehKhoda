@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>دهخدا — جست‌وجوی معنایی</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo">د</div>
+      <div>
+        <h1>فرهنگ دهخدا</h1>
+        <p class="subtitle">جست‌وجوی معنایی ترکیبی (معنایی + کلیدواژه‌ای)</p>
+      </div>
+    </div>
+    <div class="status">
+      <span id="status-dot" class="dot dot-off"></span>
+      <span id="status-text">در حال راه‌اندازی موتور…</span>
+    </div>
+  </header>
+
+  <main id="chat" class="chat" aria-live="polite">
+    <div class="welcome card">
+      <h2>سلام! 👋</h2>
+      <p>
+        واژه یا مفهوم مورد نظرتان را بنویسید؛ جست‌وجو روی ۳۱۲٬۵۰۷ مدخل
+        «لغت‌نامهٔ دهخدا» با ترکیب جست‌وجوی <b>معنایی</b> (Dense) و
+        <b>کلیدواژه‌ای</b> (BM25) و ادغام <b>RRF</b> انجام می‌شود.
+      </p>
+      <div class="samples">
+        <button class="chip" data-q="عشق">عشق</button>
+        <button class="chip" data-q="احساس عمیق محبت و دلدادگی">احساس عمیق محبت…</button>
+        <button class="chip" data-q="جرم نورانی آسمان">جرم نورانی آسمان</button>
+        <button class="chip" data-q="آفتاب">آفتاب</button>
+      </div>
+    </div>
+  </main>
+
+  <footer class="inputbar">
+    <input id="q" type="text" placeholder="واژه یا پرسش خود را بنویسید…" autocomplete="off" />
+    <button id="go" class="btn-primary">جست‌وجو</button>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

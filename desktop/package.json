@@ -1,0 +1,12 @@
+{
+  "name": "dehkhoda-desktop",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Tauri v2 shell for the Dehkhoda RAG sidecar",
+  "scripts": {
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

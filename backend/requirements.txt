@@ -1,0 +1,21 @@
+# Backend runtime (full profile — includes torch via CPU wheel instructions).
+#
+#   pip install -r requirements.txt -f https://download.pytorch.org/whl/torch_stable.html
+# (or pre-install: pip install torch --index-url https://download.pytorch.org/whl/cpu)
+#
+# Pinned versions and rationale: see docs/VERSIONS.md
+fastapi==0.162.0
+uvicorn[standard]==0.54.0
+pydantic-settings==2.16.1
+
+# Vector stores
+pymilvus[model]==2.6.17          # matches Milvus server 2.6.x (docker-compose pins v2.6.25)
+milvus-lite==3.2.2; sys_platform != "win32"   # Linux/macOS only — no Windows wheels by design
+qdrant-client==1.20.0            # Windows fallback backend (no Docker needed)
+
+# Persian NLP
+hazm==0.12.1
+parsivar==0.2.3.1
+
+# Dense embeddings (CPU)
+sentence-transformers==6.2.0

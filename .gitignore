@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+backend/build/
+backend/dist/
+
+# Node / Rust / Tauri
+node_modules/
+desktop/src-tauri/target/
+desktop/src-tauri/resources/dehkhoda-server/
+desktop/src-tauri/gen/
+
+# App data (never ship user data)
+data/
+volumes/
+*.db
+*.db-journal
+.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Workspace-only artifacts (sandbox dev environment, not part of the deliverable)
+venvs/
+skills/
+upload/
+download/
+worklog.md
+scripts/verify_stage*.py

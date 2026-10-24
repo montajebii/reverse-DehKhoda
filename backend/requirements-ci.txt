@@ -1,0 +1,11 @@
+# CI / test-only profile — no torch, uses the hash embedder.
+fastapi==0.162.0
+uvicorn[standard]==0.54.0
+pydantic-settings==2.16.1
+pymilvus[model]==2.6.17
+milvus-lite==3.2.2; sys_platform != "win32"
+qdrant-client==1.20.0
+hazm==0.12.1
+parsivar==0.2.3.1
+pytest==9.1.1
+httpx==0.28.1
