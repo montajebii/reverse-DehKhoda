@@ -23,6 +23,9 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager, RunEvent, State};
 
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
 struct SidecarState {
     child: Mutex<Option<Child>>,
     port: Mutex<Option<u16>>,
