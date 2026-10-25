@@ -39,7 +39,13 @@ jobs:
         run: |
           docker run --rm -v "$PWD":/repo -w /repo python:3.12-slim bash -c '
             set -e
-            pip install --quiet pymilvus
+            # pymilvus alone is NOT enough: MilvusClient(uri="*.db") local mode
+            # requires the separate milvus-lite embedded engine. This step exists
+            # precisely to prove a stable wheel ships for linux-x86_64 + py3.12
+            # (decision-table rule 3). If this install fails, Milvus Lite is
+            # unavailable on this platform and the wizard must fall back to
+            # qdrant_native instead of silently assuming the wheel exists.
+            pip install --quiet pymilvus milvus-lite
             python3 /repo/bootstrap/tests/test_milvus_lite.py
           '
 
