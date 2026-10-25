@@ -1,0 +1,278 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # ================================================== Linux container tests
+  container-tests:
+    name: installer-adapters (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: ubuntu:22.04
+            setup: apt-get update && apt-get install -y python3
+          - image: archlinux:base-devel
+            setup: pacman -Sy --noconfirm --needed python
+          - image: fedora:latest
+            setup: dnf install -y python3
+    steps:
+      - uses: actions/checkout@v4
+      - name: "Adapter test inside ${{ matrix.image }}"
+        run: |
+          docker run --rm -v "$PWD":/repo -w /repo ${{ matrix.image }} bash -c '
+            set -e
+            ${{ matrix.setup }} >/dev/null 2>&1 || ${{ matrix.setup }}
+            echo "=== shape assertions ==="
+            python3 bootstrap/tests/test_installer_linux.py
+            echo "=== real engine install (package names must exist) ==="
+            python3 bootstrap/tests/test_installer_linux.py --real
+          '
+      - name: "Milvus Lite wheel verification (decision-table rule 3, build time)"
+        run: |
+          docker run --rm -v "$PWD":/repo -w /repo python:3.12-slim bash -c '
+            set -e
+            pip install --quiet pymilvus
+            python3 - <<"PY"
+            import sys
+            sys.path.insert(0, "/repo")
+            from bootstrap.backend_launcher import smoke_milvus_lite
+            class EM:
+                def progress(self, **kw): print("   ", kw)
+            ok = smoke_milvus_lite(EM())
+            print("milvus_lite smoke:", ok)
+            assert ok, "Milvus Lite hybrid capability smoke FAILED"
+            PY
+          '
+
+  # ================================================== Windows bootstrap test
+  windows-bootstrap:
+    name: windows-bootstrap
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: "PowerShell syntax check (installer_win.ps1)"
+        shell: pwsh
+        run: |
+          $tokens = $null; $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            "$PWD/bootstrap/installer_win.ps1", [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Error $_.Message }; exit 1 }
+          Write-Host "installer_win.ps1: syntax OK"
+      - name: "Detector selftest (mocked Ubuntu/Arch/Win11)"
+        run: python -m bootstrap.detector --selftest
+      - name: "PS1 detect + no-docker scenario -> decision table"
+        shell: pwsh
+        run: |
+          $out = & powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+            -File bootstrap/installer_win.ps1 -Action detect -AssumeNoDocker -JsonOut detect-absent.json
+          Get-Content detect-absent.json
+          $j = Get-Content detect-absent.json -Raw | ConvertFrom-Json
+          if ($j.docker.installed -ne $false) { Write-Error "expected docker absent"; exit 1 }
+          if ($j.ok -ne $true) { Write-Error "detect failed"; exit 1 }
+          Write-Host "no-docker scenario OK"
+      - name: "Decision table: Windows + docker declined -> qdrant_native"
+        run: |
+          python - <<PY
+          import json
+          from bootstrap.detector import decide_backend
+          rep = {
+            "os": {"type": "windows", "distro": "windows", "family": None,
+                   "arch": "x86_64", "glibc_ok": True},
+            "docker": {"installed": False, "running": False},
+            "windows": {"winget": True, "wsl2": True, "docker_desktop_installed": False},
+            "python": {"present": True, "bundled": True},
+            "milvus_lite": {"available": False},
+            "linux": None,
+          }
+          d = decide_backend(rep, consent=False)
+          print(json.dumps(d))
+          assert d["path"] == "qdrant_native", d
+          print("decision-table fallback OK")
+          PY
+
+  # ================================================== Linux packages
+  build-linux:
+    name: packages (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Linux system deps (Tauri)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf
+      - name: Backend + AppImage + deb (+ pinned qdrant)
+        run: bash installer/linux/appimage.sh
+        env:
+          DEHKHODA_BUNDLE_PROFILE: full
+      - name: Arch package (.pkg.tar.zst)
+        run: |
+          docker run --rm -v "$PWD":/repo -w /repo archlinux:base-devel bash -c '
+            set -e
+            pacman -Sy --noconfirm --needed zstd >/dev/null
+            bash installer/linux/arch.sh $(ls -t dist-linux/*.deb | head -1)
+          '
+      - name: CLI selftest on the bundled sidecar
+        run: |
+          BIN=backend/dist/dehkhoda-server/dehkhoda-server
+          DEHKHODA_DATA_DIR=/tmp/dh-ci "$BIN" bootstrap --step selftest | tail -1 | grep -q '"ok": *true'
+          DEHKHODA_DATA_DIR=/tmp/dh-ci "$BIN" bootstrap --step report | tail -1 | grep -q '"ok": *true'
+      - name: SHA256 checksums
+        run: |
+          cd dist-linux
+          sha256sum *.AppImage *.deb *.pkg.tar.zst > SHA256SUMS
+          cat SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dehkhoda-linux
+          path: |
+            dist-linux/*.AppImage
+            dist-linux/*.deb
+            dist-linux/*.pkg.tar.zst
+            dist-linux/SHA256SUMS
+          retention-days: 14
+
+  # ================================================== Windows installer
+  build-windows:
+    name: installer (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build sidecar (full profile)
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -r backend/requirements.txt pyinstaller
+          cd backend
+          DEHKHODA_BUNDLE_MODE=onedir DEHKHODA_BUNDLE_PROFILE=full \
+            python -m PyInstaller --noconfirm --clean --distpath dist --workpath build dehkhoda-server.spec
+      - name: Fetch pinned qdrant.exe sidecar
+        shell: bash
+        run: |
+          mkdir -p desktop/src-tauri/resources/sidecars/qdrant
+          python - <<PY
+          import shutil, sys, zipfile
+          from pathlib import Path
+          sys.path.insert(0, ".")
+          from bootstrap import model_fetcher
+          pins = model_fetcher.load_pins()["qdrant"]
+          f = pins["files"]["windows-x86_64"]
+          dest = Path("desktop/src-tauri/resources/sidecars/qdrant") / f["name"]
+          model_fetcher.download_file(f"{pins['base_url']}/{f['name']}", dest, sha256=f["sha256"])
+          out = Path("desktop/src-tauri/resources/sidecars/qdrant/qdrant.exe")
+          with zipfile.ZipFile(dest) as zf:
+              src = next(n for n in zf.namelist() if n.endswith("qdrant.exe"))
+              with zf.open(src) as s, open(out, "wb") as d:
+                  shutil.copyfileobj(s, d)
+          dest.unlink()
+          print("qdrant.exe ready:", out.stat().st_size, "bytes")
+          PY
+      - name: Bundle resources + Tauri build (no bundler)
+        shell: bash
+        run: |
+          mkdir -p desktop/src-tauri/resources/dehkhoda-server
+          rm -rf desktop/src-tauri/resources/dehkhoda-server/*
+          cp -r backend/dist/dehkhoda-server/. desktop/src-tauri/resources/dehkhoda-server/
+          cd desktop && npm install --no-fund --no-audit && npx tauri build --no-bundle
+      - name: Compile NSIS installer
+        shell: pwsh
+        run: |
+          choco install nsis -y --no-progress
+          $exe = "desktop/src-tauri/target/release/dehkhoda-rag.exe"
+          & "C:\Program Files (x86)\NSIS\makensis.exe" `
+            -DAPP_EXE="$PWD/$exe" `
+            -DBACKEND_DIR="$PWD/desktop/src-tauri/resources/dehkhoda-server" `
+            -DQDRANT_DIR="$PWD/desktop/src-tauri/resources/sidecars/qdrant" `
+            -DVERSION="1.2.0" installer/windows/nsis.nsi
+      - name: Sign installer (if certificate secret present)
+        if: env.WINDOWS_CERTIFICATE != ''
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        shell: pwsh
+        run: |
+          $pfx = "$PWD\cert.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
+            Select-Object -First 1 -ExpandProperty FullName
+          & $signtool sign /f $pfx /p "$env:WINDOWS_CERTIFICATE_PASSWORD" `
+            /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 dehkhoda-setup-win-1.2.0.exe
+          Remove-Item $pfx
+      - name: CLI selftest on the bundled sidecar
+        shell: bash
+        run: |
+          BIN=backend/dist/dehkhoda-server/dehkhoda-server.exe
+          DEHKHODA_DATA_DIR="$PWD/.dh-ci" "$BIN" bootstrap --step selftest | tail -1 | grep -q '"ok": *true'
+      - name: SHA256 + collect
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist-win | Out-Null
+          Copy-Item dehkhoda-setup-win-1.2.0.exe dist-win/
+          $h = (Get-FileHash dist-win\dehkhoda-setup-win-1.2.0.exe -Algorithm SHA256).Hash.ToLower()
+          "$h  dehkhoda-setup-win-1.2.0.exe" | Set-Content dist-win\SHA256SUMS.txt
+          Get-Content dist-win\SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dehkhoda-windows
+          path: |
+            dist-win/dehkhoda-setup-win-1.2.0.exe
+            dist-win/SHA256SUMS.txt
+          retention-days: 14
+
+  # ================================================== GitHub Release
+  release:
+    name: github-release
+    needs: [container-tests, windows-bootstrap, build-linux, build-windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dehkhoda-linux
+          path: rel
+      - uses: actions/download-artifact@v4
+        with:
+          name: dehkhoda-windows
+          path: rel
+      - name: Merge checksums
+        run: |
+          cd rel
+          cat SHA256SUMS SHA256SUMS.txt > SHA256SUMS.all 2>/dev/null || true
+          ls -la
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            rel/*.AppImage
+            rel/*.deb
+            rel/*.pkg.tar.zst
+            rel/*.exe
+            rel/SHA256SUMS.all
+          generate_release_notes: true

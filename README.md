@@ -5,6 +5,12 @@ Dehkhoda Dictionary (312,507 verified entries): the user enters a **meaning,
 description or sentence**, and the app returns the closest **headwords
 (سرواژه)** whose definitions match that meaning.
 
+**v1.2 — zero-terminal bootstrap:** download **one file**, double-click, and a
+Persian GUI wizard sets everything up (Docker via the native OS password
+dialog, vector DB, e5 model weights, the full dictionary) — no terminal, no
+manual installs, ever. A "Repair setup" menu entry re-runs the wizard on
+broken installs.
+
 Retrieval is hybrid: dense (`multilingual-e5-base`, 768d) + sparse (Persian
 BM25 via `pymilvus[model]`) fused with **RRF**. Both vectors are generated
 **from the definition text** — the headword is metadata — and results are
@@ -22,6 +28,37 @@ Tauri v2 shell ── spawns ──► dehkhoda-server (PyInstaller sidecar, Fas
                      Vector backend (auto): Milvus v2.6.25 (Docker)
                                             or Qdrant (no-Docker fallback)
 ```
+
+## First-run setup wizard (v1.2)
+
+The app decides its backend path at runtime (locked decision table):
+
+| # | Condition | Backend |
+|---|---|---|
+| 1 | Docker + Compose available (or installable **with user consent**) | **Milvus Standalone** via `docker compose up -d` |
+| 2 | Else on **Windows** | **Qdrant** native binary (bundled sidecar, sparse hybrid search) |
+| 3 | Else on **Linux** without Docker but with Python | **Milvus Lite** (wheel capability verified at build time, not assumed) |
+| 4 | Else | GUI explanation + **Retry** (bundled Qdrant offered explicitly first — never a silent failure) |
+
+Wizard steps: خوش آمدید → بررسی سیستم → نصب پیش‌نیازها → آماده‌سازی دیتابیس برداری →
+دانلود مدل زبانی → آماده‌سازی لغت‌نامه دهخدا → آماده است.
+
+Guarantees:
+* **No terminal window, ever** — Windows children spawn with `CREATE_NO_WINDOW`;
+  Linux elevation is the native polkit dialog (`pkexec`); Windows elevation is UAC.
+* **Idempotent** — completed steps are skipped; a healthy re-run lands on the
+  final screen in well under 10 s (measured 47 ms in the Playwright harness).
+* **Resumable** — killing the app mid-ingest resumes from the last checkpoint
+  (per-dump-file staging checkpoints + `vector_last_id` watermark + HTTP-range
+  `.part` downloads).
+* **Pinned** — every downloaded artifact (compose binary, Qdrant, e5 weights,
+  the 33 SQL dumps) is version-pinned with SHA-256 verification
+  (`bootstrap/pins.json`).
+
+Linux distros supported by the auto-installer: Debian/Ubuntu, Arch/Manjaro,
+Fedora/RHEL, openSUSE (apt/pacman/dnf/zypper via `pkexec`). Alpine/musl and
+Windows ARM64 show a clear unsupported message. See `docs/DEPLOYMENT.md` for
+the unsigned-Windows-binary warning and manual fallbacks.
 
 ## Reverse-search semantics (v1.1)
 
@@ -83,6 +120,15 @@ End-user instructions (Linux **and** Windows, incl. the no-Docker fallback):
 
 ```
 docker-compose.yml          Milvus v2.6.25 + etcd v3.5.18 + MinIO (pinned, relative volumes)
+bootstrap/                  ZERO-TERMINAL SETUP LAYER (v1.2)
+  detector.py               OS/distro/runtime detection -> report + decision table
+  installer_linux.py        apt/pacman/dnf/zypper/apk adapters via pkexec
+  installer_win.ps1/.py     Docker Desktop / winget / WSL2 (UAC only, hidden console)
+  backend_launcher.py       Milvus compose | Qdrant sidecar | Milvus Lite + health-wait
+  model_fetcher.py          checksummed, resumable downloads (e5, binaries, dumps)
+  dehkhoda_ingest.py        checkpointed, idempotent ingestion driver
+  cli.py                    `dehkhoda-server bootstrap --step …` (JSONL events)
+  pins.json                 pinned versions + SHA-256 for every download
 backend/
   app/
     config.py               env-driven settings (DEHKHODA_*)
@@ -103,11 +149,17 @@ backend/
 desktop/
   ui/                       Persian RTL search UI (vanilla, Vazirmatn bundled;
                             light/dark themes, loading/empty/error states, responsive)
-  src-tauri/                Tauri v2 shell: spawns sidecar, health-wait, kill-on-exit
+  ui/wizard*                first-run setup wizard (7-step stepper, RTL, light/dark)
+  src-tauri/                Tauri v2 shell: sidecar lifecycle, wizard event streaming,
+                            setup-state routing (wizard ↔ main UI)
+installer/                  linux: appimage.sh · deb.sh · arch.sh · windows: nsis.nsi
 scripts/                    build_backend_linux.sh · build_backend_win.ps1
                             package_tauri_linux.sh · package_tauri_win.ps1
                             download_dehkhoda.sh · test_sidecar.sh
 .github/workflows/ci.yml    tests + PyInstaller + Tauri bundles on ubuntu & windows
+.github/workflows/release.yml  container adapter tests (apt/pacman/dnf), Windows
+                            bootstrap tests, AppImage/deb/arch/NSIS packaging,
+                            SHA256SUMS + GitHub Release
 docs/DEPLOYMENT.md          end-user guide (both OSes + fallback trade-offs)
 docs/VERSIONS.md            every pinned version and why
 ```

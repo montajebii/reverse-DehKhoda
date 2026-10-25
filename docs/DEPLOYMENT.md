@@ -208,3 +208,58 @@ upgrading the sidecar:
 3. Verify with a reverse query, e.g. «احساس بی‌قراری و اضطراب» — expect
    anxiety-related headwords (اضطراب / نگرانی / وسواس …), each headword
    appearing at most once.
+
+---
+
+## v1.2 — First-run setup wizard (zero-terminal bootstrap)
+
+End users never open a terminal. Download **one file**, double-click, and the
+wizard does the rest inside the GUI (Persian, RTL, light/dark).
+
+### What runs when
+
+| Wizard step | What happens | Elevation |
+|---|---|---|
+| ۱ خوش آمدید | What will be installed/downloaded | — |
+| ۲ بررسی سیستم | OS/distro, Docker, Compose, disk/RAM, existing stores, decision-table preview | — |
+| ۳ نصب پیش‌نیازها | Docker engine (Linux) or Docker Desktop (Windows, winget), WSL2 if needed | **polkit (pkexec) / UAC — the only dialogs** |
+| ۴ آماده‌سازی دیتابیس برداری | `docker compose up -d` (Milvus) **or** bundled Qdrant **or** Milvus Lite | pkexec once if the user is outside the `docker` group |
+| ۵ دانلود مدل زبانی | e5-base weights (1.1 GB) with resume + SHA-256 | — (skippable → hash embedder) |
+| ۶ آماده‌سازی لغت‌نامه | 33 pinned SQL dumps (52 MB) → staging → 312,506 vectors, checkpointed | — |
+| ۷ آماده است | Launch the search UI | — |
+
+### Backend decision table (runtime, exact)
+
+1. Docker (+ Compose plugin or the pinned standalone binary) → **Milvus**.
+2. Windows without Docker (declined/unavailable) → **Qdrant sidecar**.
+3. Linux without Docker → **Milvus Lite** (capability smoke; wheel verified in
+   CI at build time) → if unavailable, **Qdrant** is offered explicitly.
+4. Nothing possible (Alpine/musl, Windows ARM64 w/o Docker) → friendly
+   unsupported message + Retry; never a silent failure.
+
+### Where files live (no hardcoded paths)
+
+* Linux: `~/.local/share/dehkhoda/` (state, models, dumps, volumes, bin)
+* Windows: `%LOCALAPPDATA%\Dehkhoda\`
+* Read-only bundle: PyInstaller `_internal/` (compose file, pins.json, PS1)
+
+### Repair / Reset
+
+Gear icon in the app header → «تعمیر راه‌اندازی» re-runs the wizard;
+completed steps are skipped, so a healthy install re-checks in seconds.
+Downloaded data (model, dumps, volumes) is preserved.
+
+### Windows: unsigned installer warning
+
+The NSIS installer is only Authenticode-signed when the
+`WINDOWS_CERTIFICATE`/`WINDOWS_CERTIFICATE_PASSWORD` secrets are configured in
+the repo (release workflow signs automatically). Without a certificate,
+SmartScreen shows *«Windows protected your PC»* — click **More info → Run
+anyway**; the app itself is identical.
+
+### Manual fallbacks (only if the wizard cannot help)
+
+The wizard never dumps shell commands on users. For exotic setups the
+developer path remains: `docker compose up -d` + uvicorn (see Quick start in
+the README), or `python backend/scripts/entry.py bootstrap --step selftest`
+for diagnostics.

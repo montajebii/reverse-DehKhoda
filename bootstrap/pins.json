@@ -1,0 +1,242 @@
+{
+ "$comment": "Pinned, checksummed downloads for the bootstrap wizard. Generated from official release metadata on 2026-10-25; regenerate only with scripts/gen_pins.py. Every runtime download MUST verify against these digests.",
+ "docker_compose": {
+  "version": "v5.6.1",
+  "base_url": "https://github.com/docker/compose/releases/download/v5.6.1",
+  "files": {
+   "x86_64": {
+    "name": "docker-compose-linux-x86_64",
+    "sha256": "47737f4236e6d3ccea7291995203f8f018058783b4c3a9469119811a0b5db8c0"
+   },
+   "aarch64": {
+    "name": "docker-compose-linux-aarch64",
+    "sha256": "42cfa75f51ad0ccf290bad37899e0038a8c10a0069e85233ecc1d53e3ff1347d"
+   }
+  }
+ },
+ "qdrant": {
+  "version": "v1.20.0",
+  "base_url": "https://github.com/qdrant/qdrant/releases/download/v1.20.0",
+  "files": {
+   "linux-x86_64": {
+    "name": "qdrant-x86_64-unknown-linux-gnu.tar.gz",
+    "sha256": "2361f3df0dedfef31f5444f9f15bd15d6b4a6cba6ad952daecc5fbe3867c5ee6",
+    "strip_components": 1,
+    "binary": "qdrant"
+   },
+   "linux-aarch64": {
+    "name": "qdrant-aarch64-unknown-linux-musl.tar.gz",
+    "sha256": "bd8a458b8ef8006ce2c603c5bd6d1d973e39d787f794008dd959112e747c3bb7",
+    "strip_components": 1,
+    "binary": "qdrant"
+   },
+   "windows-x86_64": {
+    "name": "qdrant-x86_64-pc-windows-msvc.zip",
+    "sha256": "6d13553584fd0411f00637519e293331ff0aa1fb79bd9e30db45839bb75de2be",
+    "strip_components": 0,
+    "binary": "qdrant.exe"
+   }
+  }
+ },
+ "embedding_model": {
+  "id": "intfloat/multilingual-e5-base",
+  "revision": "d128750597153bb5987e10b1c3493a34e5a4502a",
+  "dim": 768,
+  "total_bytes": 1134355035,
+  "resolve_base": "https://huggingface.co/intfloat/multilingual-e5-base/resolve",
+  "files": [
+   {
+    "path": "modules.json",
+    "size": 387,
+    "sha256": null,
+    "git_oid": "ac2039abdf6ff023b27c919bb9675cfe378cb10f"
+   },
+   {
+    "path": "1_Pooling/config.json",
+    "size": 200,
+    "sha256": null,
+    "git_oid": "2a824fa43c359360ecddb16808b539c6be892fef"
+   },
+   {
+    "path": "sentence_bert_config.json",
+    "size": 57,
+    "sha256": null,
+    "git_oid": "4eca68d85ecd3034cf4174d8a4033a75344ea62d"
+   },
+   {
+    "path": "config.json",
+    "size": 694,
+    "sha256": null,
+    "git_oid": "2b827c7eb80b3765ec6f465ab7cbfe173388c9dc"
+   },
+   {
+    "path": "special_tokens_map.json",
+    "size": 280,
+    "sha256": null,
+    "git_oid": "d5698132694f4f1bcff08fa7d937b1701812598e"
+   },
+   {
+    "path": "tokenizer_config.json",
+    "size": 418,
+    "sha256": null,
+    "git_oid": "6de1940d16d38be9877bf7cc228c9377841b311f"
+   },
+   {
+    "path": "sentencepiece.bpe.model",
+    "size": 5069051,
+    "sha256": "cfc8146abe2a0488e9e2a0c56de7952f7c11ab059eca145a0a727afce0db2865"
+   },
+   {
+    "path": "tokenizer.json",
+    "size": 17082660,
+    "sha256": "62c24cdc13d4c9952d63718d6c9fa4c287974249e16b7ade6d5a85e7bbb75626"
+   },
+   {
+    "path": "model.safetensors",
+    "size": 1112201288,
+    "sha256": "a18a44fad1d0b46ded15928144138cff1135d5cc8233bdd90be5f18822de09a7"
+   }
+  ]
+ },
+ "dehkhoda_dataset": {
+  "$comment": "nimah79/Dehkhoda-SQL pinned by immutable commit SHA; per-file sizes from the git tree (progress + sanity only; row-count USABLE_ROWS=312506 is the integrity check).",
+  "repo": "nimah79/Dehkhoda-SQL",
+  "commit": "185ed68bc6ad7c4244c5f4cc1c9968aa8aefa0f4",
+  "raw_base": "https://raw.githubusercontent.com/nimah79/Dehkhoda-SQL/185ed68bc6ad7c4244c5f4cc1c9968aa8aefa0f4",
+  "files": [
+   {
+    "name": "01-A",
+    "size": 590223
+   },
+   {
+    "name": "02-Alef",
+    "size": 7472355
+   },
+   {
+    "name": "03-Be",
+    "size": 3613357
+   },
+   {
+    "name": "04-Pe",
+    "size": 1812307
+   },
+   {
+    "name": "05-Te",
+    "size": 2683847
+   },
+   {
+    "name": "06-Se",
+    "size": 137401
+   },
+   {
+    "name": "07-Jim",
+    "size": 1430776
+   },
+   {
+    "name": "08-Che",
+    "size": 1017965
+   },
+   {
+    "name": "09-He",
+    "size": 1922822
+   },
+   {
+    "name": "10-Khe",
+    "size": 2201384
+   },
+   {
+    "name": "11-Dal",
+    "size": 2815691
+   },
+   {
+    "name": "12-Zal",
+    "size": 456493
+   },
+   {
+    "name": "13-Re",
+    "size": 1865114
+   },
+   {
+    "name": "14-Ze",
+    "size": 1332187
+   },
+   {
+    "name": "15-Zhe",
+    "size": 117150
+   },
+   {
+    "name": "16-Sin",
+    "size": 1794919
+   },
+   {
+    "name": "17-Shin",
+    "size": 1890782
+   },
+   {
+    "name": "18-Sad",
+    "size": 874486
+   },
+   {
+    "name": "19-Zad",
+    "size": 172467
+   },
+   {
+    "name": "20-Ta",
+    "size": 1029405
+   },
+   {
+    "name": "21-Za",
+    "size": 90854
+   },
+   {
+    "name": "22-Ain",
+    "size": 1841780
+   },
+   {
+    "name": "23-Qain",
+    "size": 958781
+   },
+   {
+    "name": "24-Fe",
+    "size": 881702
+   },
+   {
+    "name": "25-Qaf",
+    "size": 1204205
+   },
+   {
+    "name": "26-Kaf",
+    "size": 2321242
+   },
+   {
+    "name": "27-Gaf",
+    "size": 1415375
+   },
+   {
+    "name": "28-Lam",
+    "size": 1027725
+   },
+   {
+    "name": "29-Mim",
+    "size": 4741366
+   },
+   {
+    "name": "30-Noun",
+    "size": 2151949
+   },
+   {
+    "name": "31-Vav",
+    "size": 601541
+   },
+   {
+    "name": "32-He",
+    "size": 745079
+   },
+   {
+    "name": "33-Ye",
+    "size": 743939
+   }
+  ],
+  "total_bytes": 53956669
+ }
+}

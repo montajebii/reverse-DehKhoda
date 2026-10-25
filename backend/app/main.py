@@ -27,7 +27,7 @@ from app.search.bm25 import BM25Encoder  # noqa: E402
 from app.search.hybrid import HybridSearchEngine  # noqa: E402
 from app.vector_store import backend_probe  # noqa: E402
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -56,6 +56,15 @@ state = AppState()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # First-run wizard decisions (setup-state.json) -> DEHKHODA_* env.
+    # Must run before load_settings(); harmless when the state file is absent.
+    try:
+        from bootstrap.state_env import apply_env
+
+        apply_env()
+    except Exception as exc:  # pragma: no cover - bootstrap missing in some tests
+        logger.warning("setup-state env not applied: %s", exc)
+
     s = load_settings()
     state.settings = s
     logging.getLogger().setLevel(s.log_level)

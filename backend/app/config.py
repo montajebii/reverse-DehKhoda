@@ -40,6 +40,8 @@ class Settings(BaseSettings):
     embedder: str = "e5-base"
     dense_dim: int = 768
     embed_batch_size: int = 32
+    # local dir for offline model weights (bootstrap model_fetcher layout)
+    model_dir: str = ""
 
     # --- analyzer ---
     analyzer_engine: str = "hazm"  # hazm | parsivar | regex

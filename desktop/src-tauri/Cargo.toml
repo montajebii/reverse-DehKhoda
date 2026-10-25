@@ -1,6 +1,6 @@
 [package]
 name = "dehkhoda-rag"
-version = "1.0.0"
+version = "1.2.0"
 description = "Dehkhoda Dictionary — hybrid semantic search (Persian RAG)"
 authors = ["Dehkhoda RAG contributors"]
 edition = "2021"

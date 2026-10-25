@@ -34,3 +34,5 @@ scripts/verify_stage*.py
 
 # Sandbox dev tools (not part of the deliverable)
 devtools/
+dist-linux/
+dist-win/

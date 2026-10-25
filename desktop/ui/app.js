@@ -247,9 +247,40 @@ document.querySelectorAll(".chip").forEach((c) =>
     runSearch(c.dataset.q);
   })
 );
+/* ---------------- repair / reset + setup guard ---------------- */
+async function setupGuardAndRepair() {
+  const inv = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
+  if (!inv) return; // plain-browser dev: no Tauri bridge
+  try {
+    const raw = await inv("setup_state");
+    const st = typeof raw === "string" ? JSON.parse(raw) : raw;
+    if (st && st.complete === false) {
+      location.replace("wizard.html");
+      return;
+    }
+  } catch (e) { /* bridge not ready — continue */ }
+
+  const $repair = document.getElementById("repair-btn");
+  if ($repair) {
+    $repair.addEventListener("click", async () => {
+      const ok = confirm(
+        "راه‌اندازی دوباره اجرا شود؟\n\n" +
+        "«تعمیر راه‌اندازی» مراحل نصب و آماده‌سازی را از نو بررسی و تکمیل می‌کند " +
+        "(داده‌های دانلودشده حفظ می‌شوند)."
+      );
+      if (!ok) return;
+      try {
+        await inv("bootstrap_run", { step: "state", args: ["--set", "complete=false"] });
+      } catch (e) { /* best effort */ }
+      location.replace("wizard.html");
+    });
+  }
+}
+
 /* ---------------- init ---------------- */
 (async function init() {
   initTheme();
+  setupGuardAndRepair();
   const port = await resolvePort();
   BASE = `http://127.0.0.1:${port}`;
   const ok = await waitBackend();

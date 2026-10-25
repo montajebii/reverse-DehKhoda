@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -125,6 +126,11 @@ class HashingEmbedder(EmbeddingProvider):
 def get_embedder(settings, device: str = "cpu") -> EmbeddingProvider:
     kind = (settings.embedder or "e5-base").lower()
     if kind == "e5-base":
+        # Offline desktop installs point at the bootstrap-fetched weights dir.
+        model_dir = str(getattr(settings, "model_dir", "") or "").strip()
+        if model_dir and Path(model_dir).is_dir() and \
+                (Path(model_dir) / "config.json").exists():
+            return E5Embedder(device=device, model_id=model_dir)
         return E5Embedder(device=device)
     if kind == "bge-m3":
         return BGEM3Embedder(device=device)

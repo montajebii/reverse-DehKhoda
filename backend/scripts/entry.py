@@ -2,7 +2,8 @@
 """PyInstaller entrypoint — the sidecar binary executed by the Tauri shell.
 
 Usage (built binary):
-    dehkhoda-server [-p PORT] [--host HOST]
+    dehkhoda-server [-p PORT] [--host HOST]      # HTTP sidecar (normal run)
+    dehkhoda-server bootstrap --step <x> [...]   # first-run wizard steps
 
 Binds to 127.0.0.1:<port> (Tauri passes a free port via --port).
 Also runnable directly:  python backend/scripts/entry.py
@@ -16,6 +17,21 @@ import sys
 
 
 def main() -> int:
+    argv = sys.argv[1:]
+
+    # ---- bootstrap CLI (wizard steps; stdout = JSONL events) --------------
+    if argv and argv[0] == "bootstrap":
+        if not getattr(sys, "frozen", False):
+            from pathlib import Path
+
+            root = Path(__file__).resolve().parent.parent.parent
+            for p in (root, Path(__file__).resolve().parent.parent):
+                if p.is_dir() and str(p) not in sys.path:
+                    sys.path.insert(0, str(p))
+        from bootstrap.cli import main as bootstrap_main
+
+        return bootstrap_main(argv[1:])
+
     parser = argparse.ArgumentParser(description="Dehkhoda RAG sidecar server")
     parser.add_argument("--host", default=os.environ.get("DEHKHODA_HOST", "127.0.0.1"))
     parser.add_argument(

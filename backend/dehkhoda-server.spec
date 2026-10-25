@@ -19,10 +19,16 @@ from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_dyn
 
 MODE = os.environ.get("DEHKHODA_BUNDLE_MODE", "onedir")
 PROFILE = os.environ.get("DEHKHODA_BUNDLE_PROFILE", "full")
-BACKEND_DIR = Path(SPECPATH).resolve()  # the backend/ dir that contains this spec
+BACKEND_DIR = Path(SPECPATH).resolve()          # the backend/ dir
+REPO_ROOT = BACKEND_DIR.parent                  # contains bootstrap/ + pins.json
 NLTk_DATA = Path.home() / "nltk_data"
 
-datas = []
+datas = [
+    # wizard assets shipped inside the sidecar bundle
+    (str(REPO_ROOT / "bootstrap" / "pins.json"), "bootstrap"),
+    (str(REPO_ROOT / "bootstrap" / "installer_win.ps1"), "bootstrap"),
+    (str(REPO_ROOT / "docker-compose.yml"), "deploy"),
+]
 binaries = []
 hiddenimports = [
     "uvicorn.logging",
@@ -50,9 +56,17 @@ hiddenimports = [
     "parsivar",
     "pymilvus",
     "qdrant_client",
+    "bootstrap",
+    "bootstrap.detector",
+    "bootstrap.installer_linux",
+    "bootstrap.installer_win",
+    "bootstrap.backend_launcher",
+    "bootstrap.model_fetcher",
+    "bootstrap.dehkhoda_ingest",
+    "bootstrap.cli",
 ]
 
-for pkg in ["hazm", "pymilvus", "qdrant_client", "milvus_model", "nltk"]:
+for pkg in ["hazm", "pymilvus", "qdrant_client", "milvus_model", "nltk", "milvus_lite"]:
     d, b, h = collect_all(pkg)
     datas += d
     binaries += b
@@ -79,7 +93,7 @@ if PROFILE == "lite":
 
 a = Analysis(
     [str(BACKEND_DIR / "scripts" / "entry.py")],
-    pathex=[str(BACKEND_DIR)],
+    pathex=[str(BACKEND_DIR), str(REPO_ROOT)],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,

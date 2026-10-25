@@ -1,0 +1,205 @@
+/* ============================================================
+   Dehkhoda Setup Wizard — reuses the main app design tokens
+   (styles.css), RTL-first, light/dark aware, responsive.
+   ============================================================ */
+
+.wizard-body { overflow: hidden; }
+
+/* ---------- layout ---------- */
+.wizard-layout {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  gap: 0;
+  min-height: 0;
+}
+
+/* ---------- vertical stepper ---------- */
+.stepper {
+  border-inline-end: 1px solid var(--border);
+  background: var(--surface);
+  padding: 18px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow-y: auto;
+}
+.step {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  color: var(--muted);
+  font-size: 13.5px;
+  position: relative;
+  transition: background .2s ease, color .2s ease;
+}
+.step-num {
+  width: 28px; height: 28px; flex: 0 0 28px;
+  display: grid; place-items: center;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  font-size: 12.5px;
+  font-weight: 600;
+  transition: all .25s ease;
+}
+.step.active { color: var(--text); background: var(--accent-soft); font-weight: 600; }
+.step.active .step-num {
+  border-color: var(--accent);
+  color: var(--accent-text);
+  box-shadow: 0 0 0 4px var(--accent-soft);
+}
+.step.done { color: var(--text); }
+.step.done .step-num {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+.step.done .step-num::after { content: "✓"; font-size: 13px; }
+.step.done .step-num { font-size: 0; }
+.step.skipped .step-num { border-style: dashed; }
+
+/* ---------- panel ---------- */
+.panel {
+  padding: 26px clamp(18px, 4vw, 44px);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  overflow-y: auto;
+  min-height: 0;
+}
+.panel-desc { color: var(--muted); margin: 6px 0 0; font-size: 14px; }
+
+/* step cards */
+.wcard {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 18px 20px;
+  box-shadow: var(--shadow);
+}
+.wcard + .wcard { margin-top: 12px; }
+.wcard h3 { margin: 0 0 6px; font-size: 15.5px; }
+.wcard p { margin: 0; color: var(--muted); font-size: 13.5px; }
+
+/* checklist rows */
+.check-row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 4px;
+  border-bottom: 1px dashed var(--border);
+  font-size: 14px;
+}
+.check-row:last-child { border-bottom: 0; }
+.check-row .c-icon { width: 26px; text-align: center; font-size: 15px; flex: 0 0 26px; }
+.check-row .c-label { flex: 1; }
+.check-row .c-value { color: var(--muted); font-size: 12.5px; }
+.c-ok { color: var(--accent-text); }
+.c-warn { color: var(--gold); }
+.c-bad { color: var(--danger); }
+
+/* progress */
+.progress-track {
+  height: 10px;
+  background: var(--surface-2);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, var(--accent), color-mix(in srgb, var(--accent) 60%, white));
+  border-radius: 999px;
+  transition: width .35s ease;
+}
+.progress-fill.indet {
+  width: 35% !important;
+  animation: slide 1.2s ease-in-out infinite alternate;
+}
+@keyframes slide { from { margin-inline-start: 0; } to { margin-inline-start: 65%; } }
+.task-line { display: flex; justify-content: space-between; gap: 10px; margin: 10px 0 8px; font-size: 13.5px; }
+.task-line .pct { color: var(--muted); }
+
+/* consent / decision cards */
+.decision {
+  border: 1.5px solid var(--accent);
+  background: var(--accent-soft);
+}
+.decision .d-actions { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+
+/* error card */
+.error-card { border-color: var(--danger); background: var(--danger-soft); }
+.error-card h3 { color: var(--danger); }
+
+/* buttons */
+.btn-primary, .btn-ghost, .btn-danger {
+  font-family: inherit;
+  border-radius: 12px;
+  padding: 10px 22px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: transform .15s ease, filter .15s ease;
+}
+.btn-primary { background: var(--accent); color: #fff; }
+.btn-ghost { background: transparent; color: var(--accent-text); border-color: var(--border); }
+.btn-danger { background: transparent; color: var(--danger); border-color: var(--danger); }
+.btn-primary:hover, .btn-ghost:hover, .btn-danger:hover { filter: brightness(1.06); }
+.btn-primary:active, .btn-ghost:active, .btn-danger:active { transform: scale(0.97); }
+.btn-primary:disabled, .btn-ghost:disabled { opacity: .5; cursor: not-allowed; }
+
+.panel-actions {
+  display: flex; gap: 10px; justify-content: flex-start; flex-wrap: wrap;
+  margin-top: auto; padding-top: 10px;
+}
+
+/* tech log */
+.tech-log { font-size: 12px; }
+.tech-log summary { cursor: pointer; color: var(--muted); user-select: none; }
+.tech-log pre {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  max-height: 180px;
+  overflow: auto;
+  margin: 8px 0 0;
+  font-family: "Sarasa Mono SC", "Consolas", monospace;
+  font-size: 11.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+/* ready screen */
+.ready-hero { text-align: center; padding: 30px 10px; }
+.ready-hero .big { font-size: 52px; margin-bottom: 8px; }
+.ready-stats { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; margin-top: 14px; }
+.ready-stats .stat {
+  background: var(--surface-2);
+  border-radius: 12px;
+  padding: 10px 18px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.ready-stats .stat b { color: var(--text); display: block; font-size: 15px; }
+
+/* skeleton shimmer for step 2 probes */
+.skeleton-line {
+  height: 14px; border-radius: 6px; margin: 10px 0;
+  background: linear-gradient(90deg, var(--surface-2) 25%, var(--border) 50%, var(--surface-2) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.3s infinite;
+}
+@keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+
+/* responsive */
+@media (max-width: 760px) {
+  .wizard-layout { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+  .stepper {
+    flex-direction: row; overflow-x: auto;
+    border-inline-end: 0;
+    border-bottom: 1px solid var(--border);
+    padding: 10px;
+  }
+  .step { flex-direction: column; gap: 4px; min-width: 86px; text-align: center; font-size: 11px; }
+  .step-title { max-width: 86px; }
+}

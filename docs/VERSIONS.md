@@ -65,3 +65,24 @@ No dependency changes; all pins above remain.  Behavioural changes:
   DB (auto-migrated on startup).
 * New settings: `DEHKHODA_SEARCH_OVERFETCH`, `DEHKHODA_SNIPPET_CHARS`,
   `DEHKHODA_EXACT_FALLBACK` (see `.env.example`).
+
+## v1.2 — bootstrap pinned artifacts (`bootstrap/pins.json`)
+
+| Artifact | Version | Integrity |
+|---|---|---|
+| docker compose standalone (Linux fallback rung) | v5.6.1 | sha256 x86_64 + aarch64 |
+| Qdrant sidecar (Windows + Linux no-Docker fallback) | v1.20.0 | sha256 (gnu/musl/windows) |
+| multilingual-e5-base weights | HF revision `d1287505` | sha256 per LFS file (model.safetensors, tokenizer.json, sentencepiece.bpe.model) |
+| Dehkhoda SQL dumps | repo commit `185ed68b` (immutable) | per-file size + 312,506-row integrity check |
+
+Notes:
+
+* The **docker engine** itself comes from the distro's own repository
+  (docker.io / docker / moby-engine / docker) — version follows the distro,
+  elevation via pkexec.
+* The compose binary is only downloaded when neither `docker compose` (plugin)
+  nor a `docker-compose` binary already exists (resolution ladder in
+  `bootstrap/backend_launcher.py`).
+* Milvus Lite availability is **verified at build time** in the release
+  workflow (python:3.12 container runs the hybrid capability smoke); the
+  runtime re-checks importability before selecting the path.
