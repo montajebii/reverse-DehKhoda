@@ -175,18 +175,6 @@ fn find_dev_sidecar(mut p: std::path::PathBuf) -> Option<std::path::PathBuf> {
     None
 }
 
-fn spawn_cmd(bin: &std::path::Path, args: &[String]) -> Command {
-    let mut cmd = Command::new(bin);
-    cmd.args(args);
-    cmd.env("DEHKHODA_DATA_DIR", data_dir());
-    #[cfg(target_os = "windows")]
-    {
-        // 0x08000000 = CREATE_NO_WINDOW — never flash a shell window
-        cmd.creation_flags(0x0800_0000);
-    }
-    cmd
-}
-
 fn spawn_backend(app: &tauri::AppHandle, port: u16) -> Result<Child, String> {
     let dir = sidecar_dir(app)?;
     let exe = sidecar_exe(&dir);
