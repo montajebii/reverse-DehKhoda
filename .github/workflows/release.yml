@@ -108,6 +108,11 @@ jobs:
         run: bash installer/linux/appimage.sh
         env:
           DEHKHODA_BUNDLE_PROFILE: full
+          # GitHub runners have no /dev/fuse, so AppImage-based tools
+          # (linuxdeploy, linuxdeploy-plugin-appimage, AppRun) cannot mount
+          # themselves and fail with "failed to run linuxdeploy". Extract-
+          # and-run mode sidesteps FUSE entirely.
+          APPIMAGE_EXTRACT_AND_RUN: "1"
       - name: Arch package (.pkg.tar.zst)
         run: |
           docker run --rm -v "$PWD":/repo -w /repo archlinux:base-devel bash -c '
