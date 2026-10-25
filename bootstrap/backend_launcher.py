@@ -221,7 +221,7 @@ def smoke_milvus_lite(em: Emitter) -> bool:
         import tempfile
 
         import pymilvus  # noqa: F401
-        from pymilvus import DataType, MilvusClient, RRFRanker
+        from pymilvus import AnnSearchRequest, DataType, MilvusClient, RRFRanker
 
         with tempfile.TemporaryDirectory(prefix="dh-lite-") as td:
             client = MilvusClient(uri=str(Path(td) / "probe.db"))
@@ -242,12 +242,21 @@ def smoke_milvus_lite(em: Emitter) -> bool:
                 {"id": "a", "dense": [1.0] * 8, "sparse": {3: 0.5, 7: 1.0}},
                 {"id": "b", "dense": [0.0] * 7 + [1.0], "sparse": {1: 0.9}},
             ])
+            # AnnSearchRequest (NOT bare dicts) — matches the backend's real
+            # hybrid_search call in vector_store/milvus_backend.py. Passing dicts
+            # raises AttributeError: 'dict' object has no attribute 'data' on
+            # pymilvus >= 2.4.
+            dense_req = AnnSearchRequest(
+                data=[[1.0] * 8], anns_field="dense",
+                param={"metric_type": "COSINE"}, limit=2,
+            )
+            sparse_req = AnnSearchRequest(
+                data=[{3: 0.5, 7: 1.0}], anns_field="sparse",
+                param={"metric_type": "IP"}, limit=2,
+            )
             res = client.hybrid_search(
                 cols,
-                reqs=[{"data": [[1.0] * 8], "anns_field": "dense",
-                       "param": {"metric_type": "COSINE"}, "limit": 2},
-                      {"data": [{3: 0.5, 7: 1.0}], "anns_field": "sparse",
-                       "param": {"metric_type": "IP"}, "limit": 2}],
+                reqs=[dense_req, sparse_req],
                 ranker=RRFRanker(k=60), limit=2, output_fields=["id"],
             )
             client.drop_collection(cols)
