@@ -31,28 +31,30 @@ fi
   log "backend binary missing"; exit 1; }
 
 # ---------------------------------------------------------------- 1b. gfortran
-# numpy/scipy wheels ship libgfortran with a build-specific hash name
-# (e.g. libgfortran-83c28eba.so.5.0.0). PyInstaller sometimes fails to
-# bundle it, but leaves a DT_NEEDED entry referencing it. linuxdeploy
-# then can't resolve the dependency and aborts with:
+# numpy/scipy wheels ship libgfortran / libopenblas / libquadmath with
+# build-specific hash suffixes in their filenames (e.g.
+# libgfortran-83c28eba.so.5.0.0, libgfortran-83c28eba-468e71e5.so.5.0.0).
+# PyInstaller bundles the numpy .so files (which carry DT_NEEDED entries
+# for these hashed names) but does NOT always bundle the libraries
+# themselves. linuxdeploy then scans the bundle, sees the DT_NEEDED, can't
+# resolve the hashed filename from system paths, and aborts:
 #   ERROR: Could not find dependency: libgfortran-83c28eba.so.5.0.0
-# Find the library in the Python toolcache (where pip placed numpy's
-# bundled deps) and copy it into the PyInstaller bundle's _internal/ so
-# linuxdeploy can find and deploy it.
+#
+# Fix: symlink EVERY libgfortran/libopenblas/libquadmath .so found in the
+# Python toolcache into /usr/lib/x86_64-linux-gnu so linuxdeploy can
+# resolve any hash variant from the system library path. Also copy them
+# into the PyInstaller bundle as a fallback.
 BUNDLE_LIBS="${ROOT}/backend/dist/dehkhoda-server/_internal"
-if [ -d "${BUNDLE_LIBS}" ]; then
-  GFORTRAN=$(find /opt/hostedtoolcache -name 'libgfortran-*.so*' 2>/dev/null | head -1 || true)
-  if [ -n "${GFORTRAN}" ]; then
-    cp -n "${GFORTRAN}" "${BUNDLE_LIBS}/"
-    log "copied $(basename "${GFORTRAN}") into PyInstaller bundle"
-  fi
-  # Also grab libopenblas / libquadmath if present (same hash-naming issue)
-  for lib in libopenblas-*.so* libquadmath-*.so*; do
-    FOUND=$(find /opt/hostedtoolcache -name "${lib}" 2>/dev/null | head -1 || true)
-    [ -n "${FOUND}" ] && cp -n "${FOUND}" "${BUNDLE_LIBS}/" && \
-      log "copied $(basename "${FOUND}") into PyInstaller bundle"
+SYS_LIB=/usr/lib/x86_64-linux-gnu
+for pat in libgfortran-*.so* libopenblas-*.so* libquadmath-*.so*; do
+  find /opt/hostedtoolcache -name "${pat}" 2>/dev/null | while read -r lib; do
+    [ -f "${lib}" ] || continue
+    sudo ln -sf "${lib}" "${SYS_LIB}/$(basename "${lib}")" 2>/dev/null || true
+    [ -d "${BUNDLE_LIBS}" ] && cp -n "${lib}" "${BUNDLE_LIBS}/" 2>/dev/null || true
   done
-fi
+done
+sudo ldconfig 2>/dev/null || true
+log "gfortran/openblas/quadmath libraries symlinked to ${SYS_LIB}"
 
 # ---------------------------------------------------------------- 2. qdrant
 log "fetching pinned qdrant sidecar (${ARCH})"
