@@ -207,7 +207,11 @@ jobs:
             BIN=$(find squashfs-root -type f -name dehkhoda-server | head -1)
             [ -n "$BIN" ] || { echo "backend binary not found in AppImage"; exit 1; }
             chmod +x "$BIN"
-            QDRANT=$(find squashfs-root -type f -name qdrant | head -1)
+            # bundled sidecar: prefer the PRISTINE resource copy. The copy at
+            # usr/bin (externalBin) is corrupted by linuxdeploy/patchelf —
+            # it SIGSEGVs — which is exactly why the launcher uses the
+            # resource copy (see qdrant_sidecar_path in main.rs).
+            QDRANT=$(find squashfs-root -path "*sidecars/qdrant*" -name qdrant -type f | head -1)
             [ -n "$QDRANT" ] || { echo "qdrant sidecar not bundled in AppImage"; exit 1; }
             chmod +x "$QDRANT"
             export DEHKHODA_DATA_DIR=/tmp/dh-ci

@@ -107,9 +107,12 @@ fn sidecar_exe(dir: &std::path::Path) -> std::path::PathBuf {
 /// Resolve the bundled Qdrant engine binary (tauri.conf.json bundle.externalBin).
 ///
 /// Tauri installs external binaries next to the main executable; we also
-/// check the resource dir as a fallback. The resolved path is passed to the
-/// Python launcher via DEHKHODA_QDRANT_BINARY so the engine chain always
-/// finds the bundled sidecar without network downloads.
+/// bundle a pristine copy as a RESOURCE (tauri.linux.conf.json) because the
+/// AppImage bundler (linuxdeploy) runs patchelf on usr/bin binaries and
+/// corrupts static musl executables (SIGSEGV at start). The resource copy is
+/// therefore preferred; the exe-sibling copy is only a fallback (and lets the
+/// deb package work when resources land elsewhere). The resolved path is
+/// passed to the Python launcher via DEHKHODA_QDRANT_BINARY.
 fn qdrant_sidecar_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
     #[cfg(target_os = "windows")]
     let name = "qdrant.exe";
@@ -117,13 +120,13 @@ fn qdrant_sidecar_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
     let name = "qdrant";
 
     let mut cands: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(rd) = app.path().resource_dir() {
+        cands.push(rd.join("sidecars").join("qdrant").join(name));
+    }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             cands.push(dir.join(name));
         }
-    }
-    if let Ok(rd) = app.path().resource_dir() {
-        cands.push(rd.join("sidecars").join("qdrant").join(name));
     }
     cands.into_iter().find(|p| p.exists())
 }
