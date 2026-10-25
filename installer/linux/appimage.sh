@@ -66,11 +66,21 @@ chmod +x "${RES}/dehkhoda-server/dehkhoda-server"
 
 cd "${ROOT}/desktop"
 npm install --no-fund --no-audit
+
+# AppImage tooling diagnostics — linuxdeploy is itself an AppImage and has
+# historically failed silently on CI runners (no /dev/fuse, missing libfuse2,
+# or an old AppImage runtime that ignores APPIMAGE_EXTRACT_AND_RUN).
+log "AppImage env: APPIMAGE_EXTRACT_AND_RUN=${APPIMAGE_EXTRACT_AND_RUN:-<unset>} /dev/fuse=$([ -c /dev/fuse ] && echo yes || echo no) libfuse2=$(ldconfig -p 2>/dev/null | grep -c libfuse || echo 0)"
+export APPIMAGE_EXTRACT_AND_RUN="${APPIMAGE_EXTRACT_AND_RUN:-1}"
+export NO_STRIP="${NO_STRIP:-true}"
+
 # NOTE: --bundles is variadic in current Tauri CLI (clap). Quoting the
 # default would pass "appimage deb" as a single token and Tauri rejects it
 # ("invalid value 'appimage deb' for '--bundles'"). Leave unquoted so the
 # default word-splits into two args: --bundles appimage deb.
-npx tauri build --bundles ${TAURI_BUNDLES:-appimage deb}
+# --verbose makes tauri print linuxdeploy's actual stderr so failures are
+# diagnosable instead of the opaque "failed to run linuxdeploy".
+npx tauri build --verbose --bundles ${TAURI_BUNDLES:-appimage deb}
 
 # ---------------------------------------------------------------- 4. collect
 log "collecting artifacts"
