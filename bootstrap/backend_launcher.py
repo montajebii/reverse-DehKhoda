@@ -470,21 +470,30 @@ def launch_qdrant(em: Emitter, fetch_if_missing: bool = True) -> dict[str, Any]:
         kwargs["creationflags"] = CREATE_NO_WINDOW
     else:
         kwargs["start_new_session"] = True
-    proc = subprocess.Popen([str(binp)], stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL, **kwargs)
+    # sidecar output goes to a log file so ANY failure can be diagnosed from
+    # the technical panel (never a bare "exited rc=1")
+    log_dir = paths.data_dir() / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    qlog_path = log_dir / "qdrant.log"
+    kwargs["stdout"] = open(qlog_path, "wb")
+    kwargs["stderr"] = subprocess.STDOUT
+    proc = subprocess.Popen([str(binp)], **kwargs)
     em.progress(task_fa="در انتظار آماده‌شدن Qdrant…", indet=True,
-                log=f"qdrant pid={proc.pid} port={port} bin={binp}")
+                log=f"qdrant pid={proc.pid} port={port} bin={binp} log={qlog_path}")
     deadline = time.time() + 90
     while time.time() < deadline:
         if http_get(f"http://127.0.0.1:{port}/readyz", 2.0) in (200, 204):
             break
         if proc.poll() is not None:
+            tail = _tail_file(qlog_path)
             raise RuntimeError(
-                f"qdrant exited rc={proc.returncode} (binary: {binp})")
+                f"qdrant exited rc={proc.returncode} (binary: {binp}); "
+                f"log tail:\n{tail}")
         time.sleep(0.5)
     else:
         proc.kill()
-        raise RuntimeError("qdrant /readyz timeout (90s)")
+        raise RuntimeError(
+            f"qdrant /readyz timeout (90s); log tail:\n{_tail_file(qlog_path)}")
     # prove hybrid capability against the live sidecar
     from qdrant_client import QdrantClient
 
@@ -492,6 +501,17 @@ def launch_qdrant(em: Emitter, fetch_if_missing: bool = True) -> dict[str, Any]:
     em.progress(log=f"qdrant sidecar ready: {hits} hybrid hits")
     return {"backend": "qdrant_native", "url": f"http://127.0.0.1:{port}",
             "port": port, "pid": proc.pid, "probe_hits": hits, "reused": False}
+
+
+def _tail_file(path: Path, nbytes: int = 1500) -> str:
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            fh.seek(max(0, size - nbytes))
+            return fh.read().decode("utf-8", "replace").strip()[-nbytes:]
+    except OSError:
+        return "(log unavailable)"
 
 
 def launch_milvus_lite(em: Emitter) -> dict[str, Any]:

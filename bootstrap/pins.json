@@ -19,10 +19,11 @@
   "base_url": "https://github.com/qdrant/qdrant/releases/download/v1.20.0",
   "files": {
    "linux-x86_64": {
-    "name": "qdrant-x86_64-unknown-linux-gnu.tar.gz",
-    "sha256": "2361f3df0dedfef31f5444f9f15bd15d6b4a6cba6ad952daecc5fbe3867c5ee6",
+    "name": "qdrant-x86_64-unknown-linux-musl.tar.gz",
+    "sha256": "b03a64616a1f41ddab78b480a318466541765f19835318113b1821cbea8df52c",
     "strip_components": 1,
-    "binary": "qdrant"
+    "binary": "qdrant",
+    "$comment": "musl build is statically linked — runs on every glibc (Debian 12 needs <= 2.36; the gnu build requires GLIBC_2.39 and aborts there)"
    },
    "linux-aarch64": {
     "name": "qdrant-aarch64-unknown-linux-musl.tar.gz",
