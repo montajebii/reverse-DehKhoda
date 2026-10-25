@@ -118,7 +118,10 @@ jobs:
           docker run --rm -v "$PWD":/repo -w /repo archlinux:base-devel bash -c '
             set -e
             pacman -Sy --noconfirm --needed zstd >/dev/null
-            bash installer/linux/arch.sh $(ls -t dist-linux/*.deb | head -1)
+            # QUOTE the $(ls ...) — the deb filename has a space (productName
+            # is "Dehkhoda RAG"), so unquoted word-splits into two args and
+            # ar fails with "No such file: dist-linux/Dehkhoda".
+            bash installer/linux/arch.sh "$(ls -t dist-linux/*.deb | head -1)"
           '
       - name: CLI selftest on the bundled sidecar
         run: |

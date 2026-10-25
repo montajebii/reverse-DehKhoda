@@ -104,9 +104,7 @@ export NO_STRIP="${NO_STRIP:-true}"
 # default would pass "appimage deb" as a single token and Tauri rejects it
 # ("invalid value 'appimage deb' for '--bundles'"). Leave unquoted so the
 # default word-splits into two args: --bundles appimage deb.
-# --verbose makes tauri print linuxdeploy's actual stderr so failures are
-# diagnosable instead of the opaque "failed to run linuxdeploy".
-npx tauri build --verbose --bundles ${TAURI_BUNDLES:-appimage deb}
+npx tauri build --bundles ${TAURI_BUNDLES:-appimage deb}
 
 # ---------------------------------------------------------------- 4. collect
 log "collecting artifacts"
