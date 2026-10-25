@@ -98,6 +98,11 @@ TRIPLE="x86_64-unknown-linux-gnu"
 cp -f "${QDRANT_DIR}/qdrant" "${QDRANT_DIR}/qdrant-${TRIPLE}"
 chmod +x "${QDRANT_DIR}/qdrant-${TRIPLE}"
 log "qdrant externalBin ready: qdrant-${TRIPLE}"
+# record the SOURCE binary digest so the container acceptance tests can
+# verify the copies inside the AppImage were not altered in transit
+mkdir -p "${OUT}"
+sha256sum "${QDRANT_DIR}/qdrant" | awk '{print $1}' > "${OUT}/qdrant-sha256.txt"
+log "qdrant source sha256: $(cat "${OUT}/qdrant-sha256.txt")"
 
 # ------------------------------------------------------- 3. tauri appimage+deb
 log "building Tauri bundles: ${TAURI_BUNDLES:-appimage deb}"

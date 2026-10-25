@@ -160,6 +160,7 @@ jobs:
             dist-linux/*.AppImage
             dist-linux/*.deb
             dist-linux/SHA256SUMS
+            dist-linux/qdrant-sha256.txt
           retention-days: 14
 
   # ================================================== Linux acceptance tests
@@ -214,17 +215,30 @@ jobs:
             QDRANT=$(find squashfs-root -path "*sidecars/qdrant*" -name qdrant -type f | head -1)
             [ -n "$QDRANT" ] || { echo "qdrant sidecar not bundled in AppImage"; exit 1; }
             chmod +x "$QDRANT"
+            echo "=== sidecar binary integrity ==="
+            echo "extracted: $(sha256sum "$QDRANT" | awk '{print $1}')"
+            echo "expected : $(cat /repo/dist-linux/qdrant-sha256.txt 2>/dev/null || echo UNKNOWN)"
+            echo "size     : $(wc -c < "$QDRANT") bytes"
+            od -A x -t x1z -v "$QDRANT" | head -2
+            # try executing a container-local copy — isolates 'corrupted file'
+            # from 'cannot execute from bind-mounted squashfs extract'
+            cp "$QDRANT" /tmp/qdrant-test && chmod +x /tmp/qdrant-test
             export DEHKHODA_DATA_DIR=/tmp/dh-ci
-            export DEHKHODA_QDRANT_BINARY="$QDRANT"
             echo "=== acceptance 1: default engine chain must become ready ==="
             OUT=$("$BIN" bootstrap --step engine-smoke 2>/dev/null | tail -1)
             echo "$OUT"
             echo "$OUT" | grep -q "\"ok\": *true" || { echo "engine did not become ready"; exit 1; }
             echo "$OUT" | grep -q "hybrid_hits" || { echo "no hybrid search result"; exit 1; }
-            echo "=== acceptance 2: bundled qdrant SIDECAR must serve hybrid search ==="
+            export DEHKHODA_QDRANT_BINARY=/tmp/qdrant-test
+            echo "=== acceptance 2a: sidecar from /tmp copy ==="
             OUT2=$("$BIN" bootstrap --step engine-smoke --engine qdrant_native 2>/dev/null | tail -1)
             echo "$OUT2"
             echo "$OUT2" | grep -q "\"ok\": *true" || { echo "qdrant sidecar probe failed"; exit 1; }
+            export DEHKHODA_QDRANT_BINARY="$QDRANT"
+            echo "=== acceptance 2b: sidecar from the extracted AppImage path ==="
+            OUT3=$("$BIN" bootstrap --step engine-smoke --engine qdrant_native 2>/dev/null | tail -1)
+            echo "$OUT3"
+            echo "$OUT3" | grep -q "\"ok\": *true" || { echo "qdrant sidecar probe failed from squashfs path"; exit 1; }
             echo "ACCEPTANCE OK ($0)"
           '
       - name: SHA256 checksums (incl. arch package)
