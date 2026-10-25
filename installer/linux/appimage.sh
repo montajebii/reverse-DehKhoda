@@ -66,7 +66,11 @@ chmod +x "${RES}/dehkhoda-server/dehkhoda-server"
 
 cd "${ROOT}/desktop"
 npm install --no-fund --no-audit
-npx tauri build --bundles "${TAURI_BUNDLES:-appimage deb}"
+# NOTE: --bundles is variadic in current Tauri CLI (clap). Quoting the
+# default would pass "appimage deb" as a single token and Tauri rejects it
+# ("invalid value 'appimage deb' for '--bundles'"). Leave unquoted so the
+# default word-splits into two args: --bundles appimage deb.
+npx tauri build --bundles ${TAURI_BUNDLES:-appimage deb}
 
 # ---------------------------------------------------------------- 4. collect
 log "collecting artifacts"
