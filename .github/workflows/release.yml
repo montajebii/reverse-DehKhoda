@@ -198,6 +198,9 @@ jobs:
             -DBACKEND_DIR="$PWD/desktop/src-tauri/resources/dehkhoda-server" `
             -DQDRANT_DIR="$PWD/desktop/src-tauri/resources/sidecars/qdrant" `
             -DVERSION="1.2.0" installer/windows/nsis.nsi
+          # NSIS resolves OutFile relative to the script's directory, so the
+          # installer lands at installer\windows\dehkhoda-setup-win-1.2.0.exe.
+          # The Sign + SHA256 steps below reference it there.
       - name: Sign installer (if certificate secret present)
         if: env.WINDOWS_CERTIFICATE != ''
         env:
@@ -210,7 +213,8 @@ jobs:
           $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
             Select-Object -First 1 -ExpandProperty FullName
           & $signtool sign /f $pfx /p "$env:WINDOWS_CERTIFICATE_PASSWORD" `
-            /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 dehkhoda-setup-win-1.2.0.exe
+            /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
+            "installer/windows/dehkhoda-setup-win-1.2.0.exe"
           Remove-Item $pfx
       - name: CLI selftest on the bundled sidecar
         shell: bash
@@ -221,8 +225,13 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist-win | Out-Null
-          Copy-Item dehkhoda-setup-win-1.2.0.exe dist-win/
-          $h = (Get-FileHash dist-win\dehkhoda-setup-win-1.2.0.exe -Algorithm SHA256).Hash.ToLower()
+          # NSIS writes OutFile next to the .nsi script (installer/windows/).
+          $setup = "installer/windows/dehkhoda-setup-win-1.2.0.exe"
+          if (-not (Test-Path $setup)) {
+            Write-Error "installer not found at $setup"; exit 1
+          }
+          Copy-Item $setup dist-win/
+          $h = (Get-FileHash "dist-win\dehkhoda-setup-win-1.2.0.exe" -Algorithm SHA256).Hash.ToLower()
           "$h  dehkhoda-setup-win-1.2.0.exe" | Set-Content dist-win\SHA256SUMS.txt
           Get-Content dist-win\SHA256SUMS.txt
       - uses: actions/upload-artifact@v4
