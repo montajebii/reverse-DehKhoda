@@ -31,30 +31,39 @@ fi
   log "backend binary missing"; exit 1; }
 
 # ---------------------------------------------------------------- 1b. gfortran
-# numpy/scipy wheels ship libgfortran / libopenblas / libquadmath with
-# build-specific hash suffixes in their filenames (e.g.
-# libgfortran-83c28eba.so.5.0.0, libgfortran-83c28eba-468e71e5.so.5.0.0).
-# PyInstaller bundles the numpy .so files (which carry DT_NEEDED entries
-# for these hashed names) but does NOT always bundle the libraries
+# numpy/scipy/torch wheels ship shared libraries with build-specific hash
+# suffixes in their filenames (e.g. libgfortran-83c28eba.so.5.0.0,
+# libgomp-e985bcbb.so.1.0.0, libopenblas-*.so*, libquadmath-*.so*).
+# PyInstaller bundles the Python extension .so files (which carry DT_NEEDED
+# entries for these hashed names) but does NOT always bundle the libraries
 # themselves. linuxdeploy then scans the bundle, sees the DT_NEEDED, can't
 # resolve the hashed filename from system paths, and aborts:
-#   ERROR: Could not find dependency: libgfortran-83c28eba.so.5.0.0
+#   ERROR: Could not find dependency: libgomp-e985bcbb.so.1.0.0
 #
-# Fix: symlink EVERY libgfortran/libopenblas/libquadmath .so found in the
-# Python toolcache into /usr/lib/x86_64-linux-gnu so linuxdeploy can
-# resolve any hash variant from the system library path. Also copy them
-# into the PyInstaller bundle as a fallback.
+# Fix: find ALL .so* files inside every *.libs/ directory in the Python
+# toolcache (numpy.libs, scipy.libs, torch/lib, etc.) and symlink them into
+# /usr/lib/x86_64-linux-gnu/ so linuxdeploy can resolve any hash variant
+# from the system library path. Also copy them into the bundle as fallback.
 BUNDLE_LIBS="${ROOT}/backend/dist/dehkhoda-server/_internal"
 SYS_LIB=/usr/lib/x86_64-linux-gnu
-for pat in libgfortran-*.so* libopenblas-*.so* libquadmath-*.so*; do
-  find /opt/hostedtoolcache -name "${pat}" 2>/dev/null | while read -r lib; do
-    [ -f "${lib}" ] || continue
-    sudo ln -sf "${lib}" "${SYS_LIB}/$(basename "${lib}")" 2>/dev/null || true
-    [ -d "${BUNDLE_LIBS}" ] && cp -n "${lib}" "${BUNDLE_LIBS}/" 2>/dev/null || true
+# (a) Everything in *.libs/ directories (the canonical pip-wheel location)
+find /opt/hostedtoolcache -type d -name '*.libs' 2>/dev/null | while read -r libdir; do
+  find "$libdir" -name '*.so*' 2>/dev/null | while read -r lib; do
+    [ -f "$lib" ] || continue
+    sudo ln -sf "$lib" "${SYS_LIB}/$(basename "$lib")" 2>/dev/null || true
+    [ -d "$BUNDLE_LIBS" ] && cp -n "$lib" "$BUNDLE_LIBS/" 2>/dev/null || true
+  done
+done
+# (b) Explicit patterns for libs that may live outside .libs/ dirs
+for pat in libgomp-*.so* libgfortran-*.so* libopenblas-*.so* libquadmath-*.so*; do
+  find /opt/hostedtoolcache -name "$pat" 2>/dev/null | while read -r lib; do
+    [ -f "$lib" ] || continue
+    sudo ln -sf "$lib" "${SYS_LIB}/$(basename "$lib")" 2>/dev/null || true
+    [ -d "$BUNDLE_LIBS" ] && cp -n "$lib" "$BUNDLE_LIBS/" 2>/dev/null || true
   done
 done
 sudo ldconfig 2>/dev/null || true
-log "gfortran/openblas/quadmath libraries symlinked to ${SYS_LIB}"
+log "numpy/scipy/torch hash-named libraries symlinked to ${SYS_LIB}"
 
 # ---------------------------------------------------------------- 2. qdrant
 log "fetching pinned qdrant sidecar (${ARCH})"
