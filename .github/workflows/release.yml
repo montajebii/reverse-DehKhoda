@@ -40,16 +40,7 @@ jobs:
           docker run --rm -v "$PWD":/repo -w /repo python:3.12-slim bash -c '
             set -e
             pip install --quiet pymilvus
-            python3 - <<"PY"
-            import sys
-            sys.path.insert(0, "/repo")
-            from bootstrap.backend_launcher import smoke_milvus_lite
-            class EM:
-                def progress(self, **kw): print("   ", kw)
-            ok = smoke_milvus_lite(EM())
-            print("milvus_lite smoke:", ok)
-            assert ok, "Milvus Lite hybrid capability smoke FAILED"
-            PY
+            python3 /repo/bootstrap/tests/test_milvus_lite.py
           '
 
   # ================================================== Windows bootstrap test
@@ -82,24 +73,7 @@ jobs:
           if ($j.ok -ne $true) { Write-Error "detect failed"; exit 1 }
           Write-Host "no-docker scenario OK"
       - name: "Decision table: Windows + docker declined -> qdrant_native"
-        run: |
-          python - <<PY
-          import json
-          from bootstrap.detector import decide_backend
-          rep = {
-            "os": {"type": "windows", "distro": "windows", "family": None,
-                   "arch": "x86_64", "glibc_ok": True},
-            "docker": {"installed": False, "running": False},
-            "windows": {"winget": True, "wsl2": True, "docker_desktop_installed": False},
-            "python": {"present": True, "bundled": True},
-            "milvus_lite": {"available": False},
-            "linux": None,
-          }
-          d = decide_backend(rep, consent=False)
-          print(json.dumps(d))
-          assert d["path"] == "qdrant_native", d
-          print("decision-table fallback OK")
-          PY
+        run: python bootstrap/tests/test_decision_table.py
 
   # ================================================== Linux packages
   build-linux:
@@ -114,6 +88,11 @@ jobs:
         with:
           node-version: "20"
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install Python deps (PyInstaller + backend)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -r backend/requirements.txt pyinstaller
       - name: Linux system deps (Tauri)
         run: |
           sudo apt-get update
@@ -204,9 +183,12 @@ jobs:
         shell: pwsh
         run: |
           choco install nsis -y --no-progress
-          $exe = "desktop/src-tauri/target/release/dehkhoda-rag.exe"
+          # Resolve-Path normalises to native backslashes. NSIS `File` chokes
+          # on the mixed forward/backward slashes that "$PWD/$relpath"
+          # produces on Windows runners ("no files found" at compile time).
+          $exe = (Resolve-Path "desktop/src-tauri/target/release/dehkhoda-rag.exe").Path
           & "C:\Program Files (x86)\NSIS\makensis.exe" `
-            -DAPP_EXE="$PWD/$exe" `
+            -DAPP_EXE="$exe" `
             -DBACKEND_DIR="$PWD/desktop/src-tauri/resources/dehkhoda-server" `
             -DQDRANT_DIR="$PWD/desktop/src-tauri/resources/sidecars/qdrant" `
             -DVERSION="1.2.0" installer/windows/nsis.nsi

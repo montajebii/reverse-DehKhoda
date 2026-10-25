@@ -30,7 +30,11 @@ EXPECTED_FAMILY = {
 }
 EXPECTED_CMDS = {
     "debian": ["apt-get", "install"],
-    "arch": ["pacman", "-Sy"],
+    # NOTE: do NOT use ["pacman", "-Sy"] here — that token pair also matches
+    # the refresh cmd (`pacman -Sy --noconfirm`), so next() would pick the
+    # refresh cmd instead of the install cmd and engine_pkgs_declared would
+    # wrongly fail. `--needed` is unique to install_argv.
+    "arch": ["pacman", "--needed"],
     "rhel": ["dnf", "install"],
 }
 ENGINE_BINARIES = {
