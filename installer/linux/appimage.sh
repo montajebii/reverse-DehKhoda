@@ -49,12 +49,15 @@ fi
 BUNDLE_LIBS="${ROOT}/backend/dist/dehkhoda-server/_internal"
 SYS_LIB=/usr/lib/x86_64-linux-gnu
 # containers run as root without sudo; hosted runners need sudo
-SUDO=""; [ "$(id -u)" != "0" ] && SUDO="sudo"
+SUDO=""; [ "$(id -u)" != "0" ] && SUDO="sudo" || true
 # works both on hosted runners (/opt/hostedtoolcache) and inside build
-# containers (python:3.12-slim-bookworm etc.)
+# containers (python:3.12-slim-bookworm etc.). NOTE: find exits 1 when a
+# path is missing (e.g. /opt/hostedtoolcache in containers) — under
+# `set -o pipefail` that would kill the script, hence the || true guard.
 SITE_PACKAGES="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])' 2>/dev/null || true)"
-find "${SITE_PACKAGES:-/nonexistent}" /opt/hostedtoolcache/Python \
-     -path '*/site-packages/*' -name 'lib*.so*' 2>/dev/null | while read -r lib; do
+{ find "${SITE_PACKAGES:-/nonexistent}" /opt/hostedtoolcache/Python \
+     -path '*/site-packages/*' -name 'lib*.so*' 2>/dev/null || true; } |
+while read -r lib; do
   [ -f "$lib" ] || continue
   $SUDO ln -sf "$lib" "${SYS_LIB}/$(basename "$lib")" 2>/dev/null || true
   [ -d "$BUNDLE_LIBS" ] && cp -n "$lib" "$BUNDLE_LIBS/" 2>/dev/null || true

@@ -105,10 +105,16 @@ jobs:
           # Node 20 (binary tarball; nodesource not needed)
           curl -fsSL https://nodejs.org/dist/v20.18.1/node-v20.18.1-linux-x64.tar.xz \
             | tar -xJ -C /usr/local --strip-components=1
-          # Rust (stable, minimal profile)
+          # Rust: GH container jobs set HOME=/github/home while the passwd
+          # db says /root — rustup-init refuses that mismatch. Pin all three
+          # homes to /root and export them for later steps.
+          export HOME=/root
+          echo "HOME=/root" >> "$GITHUB_ENV"
+          echo "CARGO_HOME=/root/.cargo" >> "$GITHUB_ENV"
+          echo "RUSTUP_HOME=/root/.rustup" >> "$GITHUB_ENV"
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
             | sh -s -- -y --default-toolchain stable --profile minimal
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          echo "/root/.cargo/bin" >> "$GITHUB_PATH"
       - uses: actions/checkout@v4
       - name: Install Python deps (PyInstaller + backend)
         run: |
