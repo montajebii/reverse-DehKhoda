@@ -1,8 +1,15 @@
 """FastAPI application: POST /search, POST /ingest, GET /health.
 
-Startup resolution order (locked 'auto' behaviour):
-  Milvus (Docker Compose) reachable? -> use it.
-  Otherwise -> Qdrant fallback (local persistence or native-binary server).
+Startup resolution order (v1.2.1, locked 'auto' behaviour):
+  1. bootstrap.engine_runtime.ensure_runtime(): re-attach to the engine the
+     wizard launched (or re-run the fallback chain when it is dead — e.g.
+     relaunch the bundled Qdrant sidecar on a fresh port).
+  2. backend_probe(): verify the connection; 'auto' still prefers a live
+     Milvus and falls back to Qdrant.
+If EVERY engine fails, the sidecar still STARTS (degraded) so that
+GET /health can carry the exact engine_error (full traceback + the exact
+missing shared library) — the UI must never show a generic
+"engine is not available" without technical detail.
 """
 
 from __future__ import annotations
@@ -27,7 +34,7 @@ from app.search.bm25 import BM25Encoder  # noqa: E402
 from app.search.hybrid import HybridSearchEngine  # noqa: E402
 from app.vector_store import backend_probe  # noqa: E402
 
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.2.1"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -49,9 +56,25 @@ class AppState:
         self.engine: Optional[HybridSearchEngine] = None
         self.loader = None
         self.exact_index_ready = False
+        # Structured diagnostics of the last engine-init failure (full
+        # traceback + exact missing shared libraries). Exposed via /health.
+        self.engine_error: Optional[dict] = None
 
 
 state = AppState()
+
+
+def _engine_error_from(exc: Exception) -> dict:
+    try:
+        from bootstrap.native_preload import describe_exception
+
+        return describe_exception(exc, "http-sidecar")
+    except Exception:  # pragma: no cover - bootstrap absent in some tests
+        import traceback
+
+        return {"engine": "http-sidecar", "error": str(exc),
+                "missing_libs": [],
+                "traceback": "".join(traceback.format_exception(exc))[-4000:]}
 
 
 @asynccontextmanager
@@ -65,12 +88,33 @@ async def lifespan(app: FastAPI):
     except Exception as exc:  # pragma: no cover - bootstrap missing in some tests
         logger.warning("setup-state env not applied: %s", exc)
 
+    # Self-healing engine runtime: re-attach to the running engine or re-run
+    # the fallback chain (e.g. relaunch a dead Qdrant sidecar on a fresh
+    # port). Failures here are non-fatal — the app starts degraded and
+    # /health carries the exact diagnostics.
+    try:
+        from bootstrap import backend_launcher
+
+        rt = backend_launcher.ensure_runtime()
+        logger.info("engine runtime ensured: %s", rt.get("engine"))
+        # re-apply env so DEHKHODA_* reflect the engine that is REALLY up
+        from bootstrap.state_env import apply_env as _reapply
+
+        _reapply()
+    except Exception as exc:
+        state.engine_error = _engine_error_from(exc)
+        logger.error("engine runtime ensure FAILED: %s", state.engine_error["error"])
+        logger.error(state.engine_error["traceback"])
+
     s = load_settings()
     state.settings = s
     logging.getLogger().setLevel(s.log_level)
 
     state.analyzer = PersianAnalyzer(s.analyzer_engine)
-    state.backend = backend_probe(s)  # connect + auto-fallback resolved here
+    if state.engine_error is None:
+        state.backend = backend_probe(s)  # connect + auto-fallback resolved here
+    else:
+        state.backend = None
     state.embedder = get_embedder(s)
     state.bm25 = BM25Encoder(
         state.analyzer,
@@ -98,7 +142,8 @@ async def lifespan(app: FastAPI):
     )
     logger.info(
         "dehkhoda-rag ready: backend=%s embedder=%s(dim=%d) analyzer=%s",
-        state.backend.name, state.embedder.name, state.embedder.dim, state.analyzer.engine,
+        getattr(state.backend, "name", "unavailable"), state.embedder.name,
+        state.embedder.dim, state.analyzer.engine,
     )
     try:
         yield
@@ -218,6 +263,10 @@ def health() -> dict[str, Any]:
         "collection": state.settings.collection_name if state.settings else None,
         "exact_index_ready": state.exact_index_ready,
     }
+    if state.engine_error is not None:
+        # NEVER a bare generic failure: full traceback + exact missing libs
+        info["engine_error"] = state.engine_error
+        info["status"] = "degraded"
     if state.backend is not None:
         try:
             info["backend"] = state.backend.health()
@@ -225,6 +274,8 @@ def health() -> dict[str, Any]:
         except Exception as exc:
             info["backend"] = {"error": str(exc)}
             info["status"] = "degraded"
+    elif state.engine_error is None:
+        info["status"] = "degraded"
     return info
 
 

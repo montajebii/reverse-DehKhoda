@@ -13,7 +13,8 @@ Schema (v2):
   "schema": 2,
   "bootstrap_version": "1.0.0",
   "complete": false,
-  "backend": "milvus|milvus_lite|qdrant_native|null",
+  "backend": "milvus|milvus_lite|qdrant_native|qdrant_local|null",  # user's preferred choice
+  "backend_active": "qdrant_local|qdrant_native|milvus_lite|milvus|null",  # engine that launch() actually brought up
   "embedder": "e5-base|hash",
   "steps": {"welcome": "done|skipped", "system": "done", ...},
   "decisions": {"docker_consent": true|false, "model_skipped": false},

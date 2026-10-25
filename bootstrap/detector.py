@@ -5,17 +5,20 @@ commands to the user: every command goes through a `CommandRunner` (mockable
 in selftests), and the report contains machine-readable codes that the
 wizard's UI layer translates into Persian sentences.
 
-Backend decision table (locked by spec — implement exactly):
-  1. Docker (+ Compose plugin or the pinned standalone compose binary)
-     available or installable-with-consent  -> Milvus Standalone.
-  2. Else on Windows -> Qdrant native binary (bundled sidecar).
-  3. Else on Linux without Docker but with Python (Milvus Lite wheel
-     verified available for the bundled runtime) -> Milvus Lite.
-  4. Else -> GUI explanation + Retry (never silent failure). As a
-     transparent, user-confirmed last resort the bundled Qdrant binary is
-     offered before declaring the install impossible (acceptance criterion:
-     "if Docker is unavailable or declined, the wizard transparently
-     switches to the Qdrant fallback").
+Backend decision table (locked by spec v1.2.1 — implement exactly):
+  1. DEFAULT everywhere: **Qdrant** (bundled sidecar binary; embedded
+     local mode as the in-process fallback) — fully self-contained, no
+     Docker, no installs, no elevation. The AppImage works out of the box
+     on Arch / Debian / Fedora / Ubuntu.
+  2. Windows: Docker Desktop available + running -> Milvus Standalone;
+     otherwise -> Qdrant sidecar (unchanged behaviour).
+  3. Linux: Milvus Standalone via Docker is an OPTIONAL "advanced" mode —
+     offered in the wizard when Docker is present or installable
+     (`advanced` field), never auto-installed. Milvus Lite is NOT chosen
+     by the decision table any more (it is only a launch-chain fallback,
+     gated to Ubuntu >= 20.04 with a clean native import — see
+     backend_launcher).
+  4. musl/Alpine stays unsupported (bundled backend is glibc-linked).
 """
 
 from __future__ import annotations
@@ -365,74 +368,65 @@ def detect_existing_stores() -> dict:
 # decision table
 # =========================================================================
 def decide_backend(rep: dict, consent: Optional[bool] = None) -> dict:
-    """Map a report -> backend path per the locked decision table.
+    """Map a report -> backend path per the locked decision table (v1.2.1).
 
-    consent: None  = user not yet asked (wizard will ask when needed)
+    consent: None  = user not yet asked
              True  = user agreed to install Docker / prerequisites
              False = user declined
+    Only the WINDOWS branch still consults consent. On Linux the default is
+    always the self-contained Qdrant engine; Milvus via Docker is returned
+    in the `advanced` list for the wizard to offer explicitly.
     """
     osinfo, docker = rep["os"], rep["docker"]
     reasons: list[str] = []
-    needs: list[str] = []
 
     if osinfo["type"] == "linux" and not osinfo.get("glibc_ok", True):
         return {"path": "impossible",
                 "reasons": ["musl_not_supported"], "needs": [],
-                "engine_packages": []}
+                "engine_packages": [], "advanced": []}
 
-    if docker.get("installed") and docker.get("running"):
-        reasons.append("docker_available")
-        return {"path": "milvus", "reasons": reasons, "needs": [],
-                "engine_packages": []}
-
-    # Docker missing: installable with user consent?
-    if osinfo["type"] == "linux":
-        installable = bool(
-            osinfo.get("glibc_ok")
-            and osinfo.get("package_manager")
-            and rep.get("linux", {}).get("pkexec")
-        )
-    else:
-        installable = bool(rep.get("windows", {}).get("winget"))
-    engine_packages = _ENGINE_PKG.get(osinfo.get("family") or "", []) \
-        if osinfo["type"] == "linux" else []
-
-    if installable and consent is None:
-        reasons.append("docker_installable")
-        return {"path": "milvus_pending_consent", "reasons": reasons,
-                "needs": ["ask_docker_consent"], "engine_packages": engine_packages}
-    if installable and consent is True:
-        reasons.append("docker_installable")
-        needs.append("install_docker")
-        if osinfo["type"] == "windows" and not rep.get("windows", {}).get("wsl2"):
-            needs.append("install_wsl2")
-        return {"path": "milvus", "reasons": reasons, "needs": needs,
-                "engine_packages": engine_packages}
-
-    reasons.append("docker_declined" if consent is False else "docker_unavailable")
-
+    # ------------------------------------------------------------- Windows
     if osinfo["type"] == "windows":
+        if docker.get("installed") and docker.get("running"):
+            reasons.append("docker_available")
+            return {"path": "milvus", "reasons": reasons, "needs": [],
+                    "engine_packages": [], "advanced": []}
+        installable = bool(rep.get("windows", {}).get("winget"))
+        if installable and consent is None:
+            reasons.append("docker_installable")
+            return {"path": "milvus_pending_consent", "reasons": reasons,
+                    "needs": ["ask_docker_consent"], "engine_packages": [],
+                    "advanced": []}
+        if installable and consent is True:
+            reasons.append("docker_installable")
+            needs = ["install_docker"]
+            if not rep.get("windows", {}).get("wsl2"):
+                needs.append("install_wsl2")
+            return {"path": "milvus", "reasons": reasons, "needs": needs,
+                    "engine_packages": [], "advanced": []}
+        reasons.append("docker_declined" if consent is False else "docker_unavailable")
         if osinfo.get("arch") == "x86_64":
             reasons.append("qdrant_native_fallback")
             return {"path": "qdrant_native", "reasons": reasons, "needs": [],
-                    "engine_packages": []}
+                    "engine_packages": [], "advanced": []}
         reasons.append("no_qdrant_windows_arm64")
         return {"path": "impossible", "reasons": reasons, "needs": [],
-                "engine_packages": []}
+                "engine_packages": [], "advanced": []}
 
-    # Linux without Docker:
-    if rep["python"].get("bundled") and rep["milvus_lite"].get("available"):
-        reasons.append("milvus_lite_available")
-        return {"path": "milvus_lite", "reasons": reasons, "needs": [],
-                "engine_packages": []}
-    reasons.append("milvus_lite_unavailable")
-    if osinfo.get("arch") in ("x86_64", "aarch64"):
-        # transparent, user-confirmed fallback to the bundled Qdrant binary
-        reasons.append("qdrant_native_fallback_offer")
-        return {"path": "qdrant_native", "reasons": reasons,
-                "needs": ["confirm_qdrant_fallback"], "engine_packages": []}
-    return {"path": "impossible", "reasons": reasons, "needs": [],
-            "engine_packages": []}
+    # --------------------------------------------------------------- Linux
+    # DEFAULT: the self-contained Qdrant engine. No Docker, no installs,
+    # no elevation — the AppImage works out of the box.
+    reasons.append("qdrant_default_selfcontained")
+    advanced: list[str] = []
+    if docker.get("installed") and docker.get("running"):
+        reasons.append("docker_available")
+        advanced.append("milvus")
+    elif osinfo.get("glibc_ok") and osinfo.get("package_manager") \
+            and rep.get("linux", {}).get("pkexec"):
+        reasons.append("docker_installable")
+        advanced.append("milvus_installable")
+    return {"path": "qdrant_native", "reasons": reasons, "needs": [],
+            "engine_packages": [], "advanced": advanced}
 
 
 # =========================================================================

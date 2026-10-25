@@ -2,9 +2,10 @@
 # =============================================================================
 # installer/linux/appimage.sh — one-file Linux distributable (AppImage + deb)
 #
-# Bundles: Tauri shell + PyInstaller backend (full profile) + Qdrant fallback
-# binary + wizard assets. Docker is NEVER bundled — it is installed at runtime
-# by the wizard (pkexec + distro package manager).
+# Bundles: Tauri shell + PyInstaller backend (full profile) + Qdrant engine
+# sidecar (tauri.conf.json bundle.externalBin) + wizard assets. The DEFAULT
+# engine is Qdrant — the AppImage is fully self-contained: no Docker, no
+# user installs, no elevation. Docker/Milvus is an optional advanced mode.
 #
 # Inputs (env, all optional):
 #   DEHKHODA_SKIP_BACKEND_BUILD=1   reuse backend/dist/dehkhoda-server
@@ -47,13 +48,18 @@ fi
 # library path. Also copy them into the bundle as a fallback.
 BUNDLE_LIBS="${ROOT}/backend/dist/dehkhoda-server/_internal"
 SYS_LIB=/usr/lib/x86_64-linux-gnu
-COUNT=0
-find /opt/hostedtoolcache/Python -path '*/site-packages/*' -name 'lib*.so*' 2>/dev/null | while read -r lib; do
+# containers run as root without sudo; hosted runners need sudo
+SUDO=""; [ "$(id -u)" != "0" ] && SUDO="sudo"
+# works both on hosted runners (/opt/hostedtoolcache) and inside build
+# containers (python:3.12-slim-bookworm etc.)
+SITE_PACKAGES="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])' 2>/dev/null || true)"
+find "${SITE_PACKAGES:-/nonexistent}" /opt/hostedtoolcache/Python \
+     -path '*/site-packages/*' -name 'lib*.so*' 2>/dev/null | while read -r lib; do
   [ -f "$lib" ] || continue
-  sudo ln -sf "$lib" "${SYS_LIB}/$(basename "$lib")" 2>/dev/null || true
+  $SUDO ln -sf "$lib" "${SYS_LIB}/$(basename "$lib")" 2>/dev/null || true
   [ -d "$BUNDLE_LIBS" ] && cp -n "$lib" "$BUNDLE_LIBS/" 2>/dev/null || true
 done
-sudo ldconfig 2>/dev/null || true
+$SUDO ldconfig 2>/dev/null || true
 log "shared libraries from site-packages symlinked to ${SYS_LIB}"
 
 # ---------------------------------------------------------------- 2. qdrant
@@ -82,6 +88,13 @@ dest.unlink()
 (qdir / "qdrant").chmod(0o755)
 print("qdrant ready:", qdir / "qdrant")
 PYEOF
+
+# tauri.conf.json bundle.externalBin requires the binary under its
+# target-triple name; Tauri installs it next to the main executable.
+TRIPLE="x86_64-unknown-linux-gnu"
+cp -f "${QDRANT_DIR}/qdrant" "${QDRANT_DIR}/qdrant-${TRIPLE}"
+chmod +x "${QDRANT_DIR}/qdrant-${TRIPLE}"
+log "qdrant externalBin ready: qdrant-${TRIPLE}"
 
 # ------------------------------------------------------- 3. tauri appimage+deb
 log "building Tauri bundles: ${TAURI_BUNDLES:-appimage deb}"

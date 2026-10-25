@@ -36,3 +36,4 @@ scripts/verify_stage*.py
 devtools/
 dist-linux/
 dist-win/
+.qdrant-initialized

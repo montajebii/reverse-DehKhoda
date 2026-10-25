@@ -24,6 +24,7 @@ let S = {
   state: { complete: false, steps: {}, backend: null, embedder: "e5-base" },
   report: null,          // latest detector report
   consent: null,         // docker consent decision (null = not asked)
+  chosenBackend: null,   // user's engine choice (null = default Qdrant)
   modelSkipped: false,
   busy: false,
 };
@@ -75,17 +76,19 @@ function currentStepIndex() { return STEP_IDS.indexOf(S.currentStep); }
 
 /* ---------------- backend decision -> Persian ---------------- */
 const BACKEND_FA = {
-  milvus: "Milvus (داکر) — موتور اصلی",
-  milvus_lite: "Milvus Lite — حالت سبک بدون داکر",
-  qdrant_native: "Qdrant — موتور جایگزین داخلی",
+  milvus: "Milvus (داکر) — حالت پیشرفته",
+  milvus_lite: "Milvus Lite — گزینهٔ اختیاری (Ubuntu)",
+  qdrant_native: "Qdrant — موتور پیش‌فرض داخلی (بدون داکر)",
+  qdrant_local: "Qdrant — حالت تعبیه‌شده (بدون فرایند جدا)",
   milvus_pending_consent: "Milvus (در گام بعد پرسیده می‌شود)",
   impossible: "غیرقابل نصب روی این سامانه",
 };
 const REASON_FA = {
-  docker_available: "داکر فعال است",
-  docker_installable: "داکر قابل نصب است (با تأیید شما)",
+  docker_available: "داکر فعال است (حالت پیشرفتهٔ Milvus در دسترس)",
+  docker_installable: "داکر قابل نصب است (فقط برای حالت پیشرفته)",
   docker_declined: "نصب داکر را رد کردید",
-  docker_unavailable: "داکر در دسترس نیست",
+  docker_unavailable: "داکر در دسترس نیست — موتور داخلی استفاده می‌شود",
+  qdrant_default_selfcontained: "موتور پیش‌فرض Qdrant — بدون نیاز به داکر یا نصب چیزی",
   milvus_lite_available: "نسخهٔ سبک Milvus در دسترس است",
   milvus_lite_unavailable: "نسخهٔ سبک Milvus در دسترس نیست",
   qdrant_native_fallback: "استفاده از موتور جایگزین Qdrant",
@@ -235,7 +238,7 @@ async function renderSystem() {
   card.appendChild(checkRow(true, r.resources.ram_ok, "حافظهٔ رم",
     `${faNum(r.resources.ram_gb)} گیگابایت` + (r.resources.ram_recommended ? "" : " (کمتر از حد توصیه‌شده)")));
   const beRow = checkRow(be.path !== "impossible", be.path !== "impossible",
-    "گزینهٔ انتخابی موتور", BACKEND_FA[be.path] || be.path);
+    "موتور جست‌وجو (پیش‌فرض)", BACKEND_FA[be.path] || be.path);
   card.appendChild(beRow);
   (be.reasons || []).forEach((reason) => {
     card.appendChild(el("div", "check-row",
@@ -243,16 +246,47 @@ async function renderSystem() {
        ${esc(REASON_FA[reason] || reason)}</span>`));
   });
 
+  // Advanced engine chooser — Milvus via Docker is OPTIONAL (spec v1.2.1).
+  const advanced = be.advanced || [];
+  if (advanced.length) {
+    const adv = el("details", "wcard");
+    adv.appendChild(el("summary", null, "حالت پیشرفته: موتور Milvus با داکر"));
+    adv.appendChild(el("p", null,
+      "موتور پیش‌فرض (Qdrant) هیچ پیش‌نیازی ندارد و توصیه می‌شود همان بماند. " +
+      "اگر Milvus مستقل را ترجیح می‌دهید، داکر لازم است؛ در گام بعد با پنجرهٔ رمز سیستم‌عامل نصب/راه‌اندازی می‌شود."));
+    adv.appendChild(button(
+      advanced.includes("milvus") ? "انتخاب Milvus (داکر فعال است)" : "انتخاب Milvus (نصب داکر با اجازهٔ شما)",
+      "btn-ghost", async () => {
+        S.chosenBackend = "milvus";
+        await B.runStep("state", ["--set", "backend=milvus"]);
+        await B.runStep("state", ["--set", "decisions=" + JSON.stringify({ docker_consent: true })]);
+        markStep(3, "active");
+        renderPrereqs();
+      }));
+    $panelBody.appendChild(adv);
+  }
+
   $panelActions.append(
-    button("ادامه", "btn-primary", () => renderPrereqs()),
+    button("ادامه", "btn-primary", () => advanceFromSystem()),
     button("انصراف", "btn-ghost", cancelWizard)
   );
   setStatus("on", "بررسی کامل شد");
   markStep(2, "done");
 }
 
+/* Default flow: Qdrant needs NO prerequisites — skip step 3 entirely. */
+async function advanceFromSystem() {
+  if (S.chosenBackend === "milvus") {
+    renderPrereqs();
+    return;
+  }
+  await B.runStep("state", ["--set", "backend=qdrant_native"]);
+  markStep(3, "skipped");
+  renderDatabase();
+}
+
 /* =========================================================================
-   STEP 3 — نصب پیش‌نیازها
+   STEP 3 — نصب پیش‌نیازها (فقط برای حالت پیشرفتهٔ Milvus/داکر)
    ========================================================================= */
 async function renderPrereqs() {
   S.currentStep = "prereqs";
@@ -261,6 +295,8 @@ async function renderPrereqs() {
   clearPanel();
 
   const be = (S.report && S.report.backend) || { path: "unknown" };
+  const wantsDocker = S.chosenBackend === "milvus" || be.path === "milvus" ||
+    be.path === "milvus_pending_consent";
 
   if (be.path === "impossible") {
     const c = el("div", "wcard error-card");
@@ -269,6 +305,20 @@ async function renderPrereqs() {
       "متأسفانه برای این توزیع/معماری امکان نصب خودکار وجود ندارد. توزیع‌های پشتیبانی‌شده: Ubuntu/Debian، Arch، Fedora، openSUSE و ویندوز ۱۰/۱۱."));
     $panelActions.append(button("تلاش مجدد", "btn-primary", renderSystem));
     setStatus("err", "سامانه پشتیبانی نمی‌شود");
+    return;
+  }
+
+  if (!wantsDocker) {
+    // Default Qdrant path: nothing to install. (Also the resume path when
+    // the wizard reopens after step 2 was completed.)
+    const c = el("div", "wcard");
+    c.appendChild(el("h3", null, "پیش‌نیازی لازم نیست"));
+    c.appendChild(el("p", null,
+      "موتور پیش‌فرض Qdrant داخل برنامه است؛ بدون داکر و بدون نصب هیچ چیزی اجرا می‌شود."));
+    $panelBody.appendChild(c);
+    $panelActions.append(button("ادامه", "btn-primary", renderDatabase));
+    markStep(3, "skipped");
+    setStatus("on", "پیش‌نیاز لازم ندارد");
     return;
   }
 
@@ -300,16 +350,14 @@ async function renderPrereqs() {
   }
 
   if (be.path === "qdrant_native") {
-    const needConfirm = (be.needs || []).includes("confirm_qdrant_fallback");
-    const c = el("div", "wcard" + (needConfirm ? " decision" : ""));
-    c.appendChild(el("h3", null, "موتور جایگزین: Qdrant"));
+    // Default engine: no prereqs (kept for compatibility with older reports).
+    const c = el("div", "wcard");
+    c.appendChild(el("h3", null, "موتور داخلی: Qdrant"));
     c.appendChild(el("p", null,
-      needConfirm
-        ? "داکر در دسترس نیست (یا رد شد) و نسخهٔ سبک Milvus نیز روی این سامانه موجود نیست. موتور داخلی Qdrant — بدون نیاز به هیچ پیش‌نیازی — استفاده می‌شود."
-        : "از موتور داخلی Qdrant استفاده می‌شود؛ هیچ پیش‌نیاز سیستمی لازم نیست."));
+      "از موتور داخلی Qdrant استفاده می‌شود؛ هیچ پیش‌نیاز سیستمی لازم نیست."));
     $panelActions.append(button("ادامه", "btn-primary", renderDatabase));
     setStatus("on", "پیش‌نیاز لازم ندارد");
-    markStep(3, needConfirm ? "skipped" : "done");
+    markStep(3, "skipped");
     return;
   }
 
@@ -380,9 +428,10 @@ async function doPrereqsRun() {
 async function renderDatabase() {
   S.currentStep = "database";
   markStep(4, "active");
+  const chosen = S.chosenBackend || S.state.backend || "qdrant_native";
   setHead("آماده‌سازی دیتابیس برداری",
-    (BACKEND_FA[S.backendPath || (S.report && S.report.backend.path)] || "") +
-    " — این مرحله ممکن است در اولین اجرا چند دقیقه طول بکشد.");
+    (BACKEND_FA[chosen] || BACKEND_FA.qdrant_native) +
+    " — در صورت بروز خطا، موتور جایگزین به‌صورت خودکار امتحان می‌شود.");
   clearPanel();
   const c = el("div", "wcard");
   $panelBody.appendChild(c);
@@ -393,17 +442,34 @@ async function renderDatabase() {
     const err = el("div", "wcard error-card");
     err.appendChild(el("h3", null, "راه‌اندازی موتور برداری ناموفق بود"));
     err.appendChild(el("p", null, esc(res.error_fa || "")));
+    // Requirement: exact per-engine diagnostics, never a generic message.
+    // Each failed attempt's error + missing shared libraries are rendered
+    // here AND were already streamed into the «جزئیات فنی» panel below.
+    const attempts = (res.data && res.data.attempts) || [];
+    const shown = attempts.filter((a) => !a.skipped);
+    if (shown.length) {
+      const det = el("details", "hit-details");
+      det.appendChild(el("summary", null, "خطای دقیق هر موتور"));
+      shown.forEach((a) => {
+        const line = `[${a.engine}] ${a.error || ""}` +
+          (a.missing_libs && a.missing_libs.length
+            ? ` — کتابخانهٔ گم‌شده: ${a.missing_libs.join(", ")}` : "");
+        det.appendChild(el("div", "hit-full", esc(line)));
+      });
+      err.appendChild(det);
+    }
     $panelBody.appendChild(err);
-    const canFallback = S.backendPath !== "qdrant_native";
-    if (canFallback) {
-      $panelActions.append(button("استفاده از موتور جایگزین (Qdrant)", "btn-primary", async () => {
-        await B.runStep("state", ["--set", "backend=qdrant_native"]);
-        S.backendPath = "qdrant_native";
-        renderDatabase();
+    const dockerAvailable = !!(res.data && res.data.docker_available);
+    if (dockerAvailable && chosen !== "milvus") {
+      $panelActions.append(button("امتحان Milvus با داکر (پیشرفته)", "btn-primary", async () => {
+        await B.runStep("state", ["--set", "backend=milvus"]);
+        await B.runStep("state", ["--set", "decisions=" + JSON.stringify({ docker_consent: true })]);
+        S.chosenBackend = "milvus";
+        renderPrereqs();
       }));
     }
     $panelActions.append(
-      button("تلاش مجدد", canFallback ? "btn-ghost" : "btn-primary", renderDatabase),
+      button("تلاش مجدد", "btn-primary", renderDatabase),
       button("انصراف", "btn-ghost", cancelWizard)
     );
     setStatus("err", "موتور برداری آماده نشد");
@@ -562,7 +628,12 @@ async function boot() {
   if (done.dictionary === "done") renderReady();
   else if (done.model === "done") renderDictionary();
   else if (done.database === "done") renderModel();
-  else if (done.system === "done") renderPrereqs();
+  else if (done.system === "done") {
+    // resume after the system check: only the advanced Milvus path goes
+    // through prerequisites; the default Qdrant path skips straight to db.
+    if ((S.state.backend || "") === "milvus") renderPrereqs();
+    else { S.chosenBackend = S.state.backend || null; renderDatabase(); }
+  }
   else renderWelcome();
 }
 

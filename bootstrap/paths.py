@@ -43,6 +43,10 @@ def bundled(resource: str) -> Path:
         app_dir() / resource,
         app_dir() / "resources" / resource,
         app_dir() / "_internal" / resource,  # PyInstaller >= 6 layout
+        # Tauri resource layout: the PyInstaller sidecar lives at
+        # <resource_dir>/dehkhoda-server/, so sibling resources (the qdrant
+        # sidecar binary) are one level up.
+        app_dir().parent / resource,
     ]
     for c in cands:
         if c.exists():

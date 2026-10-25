@@ -53,6 +53,11 @@ class Emitter:
             msg["error_code"] = error_code
             msg["error_fa"] = error_fa
             msg["log_tail"] = self.log_lines[-40:]
+            if data:
+                # failures can carry structured diagnostics (per-engine
+                # attempts with tracebacks + missing libraries) so the UI
+                # can show the REAL cause, never a bare generic message.
+                msg["data"] = data
         emit(msg)
 
 

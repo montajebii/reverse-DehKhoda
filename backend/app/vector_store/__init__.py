@@ -41,16 +41,22 @@ def milvus_reachable(settings, timeout: float = 2.0) -> bool:
 
 def backend_probe(settings) -> VectorStoreBackend:
     """Like get_backend() but actually verifies the connection, falling back
-    to Qdrant if the Milvus connection cannot be established."""
+    to Qdrant if the Milvus connection cannot be established.
+
+    Every fallback is logged with the FULL traceback plus the exact missing
+    shared libraries (never swallowed silently)."""
+    import logging
+    import traceback
+
     backend = get_backend(settings)
     try:
         backend.connect()
         return backend
-    except Exception as exc:  # pragma: no cover - depends on environment
+    except Exception as exc:
         if backend.name == "milvus" and settings.backend == "auto":
-            import logging
-
-            logging.getLogger(__name__).warning("Milvus unreachable (%s) — using Qdrant fallback", exc)
+            tb = "".join(traceback.format_exception(exc))
+            logging.getLogger(__name__).error(
+                "Milvus unreachable — falling back to Qdrant.\n%s", tb)
             backend.close()
             fallback = QdrantBackend(settings)
             fallback.connect()

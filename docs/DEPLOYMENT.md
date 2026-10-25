@@ -15,9 +15,11 @@ text, results grouped/deduplicated by headword.
 │  PyInstaller sidecar: dehkhoda-server (FastAPI + uvicorn)                     │
 │      │  POST /search  POST /ingest  GET /health                               │
 │      ▼                                                                        │
-│  Vector backend (auto-selected):                                              │
-│    • Milvus Standalone v2.6.25 (Docker Compose)   ← primary, Linux w/ Docker  │
-│    • Qdrant (embedded / native binary)            ← fallback, Windows no-Docker│
+│  Vector engine (automatic fallback chain, v1.2.1):                            │
+│    • Qdrant local mode (embedded, pure-Python)      ← DEFAULT                 │
+│    • Qdrant native sidecar (bundled binary)         ← bundled in AppImage     │
+│    • Milvus Lite (Ubuntu >= 20.04 only, gated)      ← optional fallback       │
+│    • Milvus Standalone v2.6.25 (Docker Compose)     ← advanced, opt-in        │
 │                                                                               │
 │  Pipeline: 33 × .sql.gz → SQLite staging → chunk → e5 + BM25 (definitions)    │
 │            → batch insert (1000–5000) → flush()                               │
@@ -43,13 +45,41 @@ the end user.
 
 ---
 
-## 2. Linux — primary path (Docker + Milvus)
+## 2. Linux — the AppImage is self-contained (Qdrant by default)
 
-### Prerequisites
-Docker Engine ≥ 24 with the Compose plugin; 6 GB RAM free for Milvus; ~10 GB
-disk for volumes + staging.
+The AppImage needs **nothing**: no Docker, no `apt`/`pacman`/`dnf` installs,
+no terminal. The default engine is **Qdrant** (bundled).
 
-### Steps
+### Engine fallback chain (automatic, v1.2.1)
+
+| Order | Engine | Condition | Notes |
+|---|---|---|---|
+| a | Milvus Lite | **Ubuntu >= 20.04 only** AND the wheel imports cleanly after native-lib preloading | officially supported on Ubuntu only; fragile when bundled (native `libmilvus`/`libknowhere` + system `libgomp`/`libgfortran`/`libopenblas`) |
+| b | **Qdrant local mode** | always available | `QdrantClient(path=<data_dir>/qdrant)` — pure Python, zero processes; sparse vectors + RRF fusion supported since qdrant-client 1.9 |
+| c | **Qdrant native sidecar** | if (b) fails | bundled binary (`bundle.externalBin`) started on a random `127.0.0.1` port, waited on `/readyz` |
+| d | Milvus Standalone | Docker available **and user consented** | advanced mode, never auto-triggered |
+| e | — | all failed | Persian error card with the EXACT error + missing shared library per engine + «تلاش مجدد» button |
+
+Every failed attempt is recorded with its **full Python traceback and the
+exact missing shared library** and shown in the collapsible «جزئیات فنی»
+panel — the app never shows a bare "engine is not available".
+
+### Supported distributions
+
+The Linux binaries are built inside a **Debian 12** container (glibc 2.36),
+so the AppImage runs on: Debian 12+, Ubuntu 22.04+, Arch (rolling),
+Fedora 36+, openSUSE. (The bundled backend requires glibc >= 2.36; Ubuntu
+20.04 is therefore out of scope for the AppImage itself.)
+
+### CI acceptance tests
+
+The release workflow runs the **packaged AppImage** inside clean containers
+(`ubuntu:24.04`, `debian:12`, `fedora:latest`, `archlinux:base-devel`):
+extracts it (`--appimage-extract`), boots the bundled engine and asserts
+that a real hybrid (dense + sparse + RRF) search returns results — with no
+external package installation inside the test containers.
+
+### Advanced path (optional Milvus via Docker)
 
 ```bash
 cd dehkhoda-rag
@@ -106,21 +136,23 @@ Smoke/CI-friendly options: `{"limit": 500}` (first N staging rows),
 
 ---
 
-## 4. Windows — fallback path (no Docker)
+## 4. Qdrant — the bundled default engine (all platforms)
 
-Milvus requires Docker; when Docker is absent the app automatically uses
-**Qdrant** (`DEHKHODA_BACKEND=auto` probes the Milvus port, falls back).
+Qdrant is the default engine everywhere; Milvus requires Docker and is an
+optional advanced mode.
 
 ### Modes
-| `DEHKHODA_QDRANT_MODE` | What runs | Use case |
+| Mode | What runs | When |
 |---|---|---|
-| `local` (default) | `qdrant-client` embedded persistence — pure Python, zero extra processes | desktop app, tests |
-| `server` | Qdrant server (e.g. the official native binary, no Docker) | larger datasets |
+| `local` (chain step b) | `qdrant-client` embedded persistence — pure Python, zero extra processes | default; also tests/dev |
+| `server` (chain step c) | the **bundled** Qdrant native binary (no Docker), started by the launcher on a random localhost port | fallback when local mode cannot init |
 
-The desktop shell can also auto-start a Qdrant native binary if
-`DEHKHODA_QDRANT_BINARY` points to one.
+The desktop shell resolves the bundled sidecar via
+`tauri.conf.json → bundle.externalBin` and passes it to the engine chain as
+`DEHKHODA_QDRANT_BINARY`; the launcher can also download the pinned binary
+(checksummed) when that env is absent.
 
-### Explicit fallback config (`.env` next to the backend, all optional)
+### Explicit config (`.env` next to the backend, all optional)
 
 ```ini
 DEHKHODA_BACKEND=qdrant
@@ -140,12 +172,12 @@ DEHKHODA_DENSE_DIM=768
   `test_flush_then_restart_persists_qdrant`).
 
 ### Trade-offs vs Milvus (documented, accepted)
-| Aspect | Milvus 2.6.25 | Qdrant fallback |
+| Aspect | Milvus 2.6.25 | Qdrant default |
 |---|---|---|
 | Server-side BM25 analyzer | possible (no Persian stemmer → not used) | n/a (client-side BM25 both ways) |
 | RRF | `hybrid_search(RRFRanker(k=60))` | Query API `Fusion.RRF` (k=2) |
 | Scale | very large, distributed-ready | desktop-scale (312k × 768f is fine) |
-| Ops | Docker required | single binary / embedded |
+| Ops | Docker required | bundled binary / embedded |
 
 Elasticsearch was **not** needed: Milvus `hybrid_search` + RRF (and Qdrant's
 equivalent) fully cover dense+sparse fusion; ES would add a JVM dependency for
@@ -184,12 +216,20 @@ smoke-tests both OSes and uploads installer artifacts on every push.
 * **`collection dim mismatch`** — the stored collection was built with another
   embedder. Set `DEHKHODA_DENSE_DIM` accordingly (e5-base 768, bge-m3 1024,
   hash 256) or re-ingest with `recreate: true`.
-* **Milvus unreachable** — `docker compose ps`; the app then silently uses
-  Qdrant (check `GET /health` → `backend.backend`).
+* **Milvus unreachable** — `docker compose ps`; the launch chain then uses
+  Qdrant automatically (check `GET /health` → `backend.backend`).
+* **"engine is not available" style failures** — never generic any more:
+  `GET /health` → `engine_error` carries the full traceback and the EXACT
+  missing shared library (e.g. `libgomp.so.1`), also shown in the UI's
+  «جزئیات فنی» panel and in `~/.local/share/dehkhoda/logs/backend.log`
+  (`%LOCALAPPDATA%\Dehkhoda\logs\backend.log` on Windows).
+* **Milvus Lite on non-Ubuntu distros** — intentionally skipped: the wheel
+  is only supported on Ubuntu >= 20.04 and is fragile when bundled. The
+  Qdrant default covers every distro; the CI gate
+  (`bootstrap --step engine-smoke --engine milvus_lite`) fails the build if
+  the bundled Milvus Lite cannot create a probe collection.
 * **Slow first search** — the e5 model (~1.1 GB) downloads on first use and is
   cached under the user's HF cache; subsequent launches are offline.
-* **Windows wheel errors for `milvus-lite`** — expected: it has no Windows
-  wheels by design; the Qdrant fallback covers Windows.
 
 ---
 
@@ -228,14 +268,17 @@ wizard does the rest inside the GUI (Persian, RTL, light/dark).
 | ۶ آماده‌سازی لغت‌نامه | 33 pinned SQL dumps (52 MB) → staging → 312,506 vectors, checkpointed | — |
 | ۷ آماده است | Launch the search UI | — |
 
-### Backend decision table (runtime, exact)
+### Backend decision table (runtime, exact — v1.2.1)
 
-1. Docker (+ Compose plugin or the pinned standalone binary) → **Milvus**.
-2. Windows without Docker (declined/unavailable) → **Qdrant sidecar**.
-3. Linux without Docker → **Milvus Lite** (capability smoke; wheel verified in
-   CI at build time) → if unavailable, **Qdrant** is offered explicitly.
-4. Nothing possible (Alpine/musl, Windows ARM64 w/o Docker) → friendly
-   unsupported message + Retry; never a silent failure.
+1. **Default everywhere: Qdrant** (embedded local mode → bundled sidecar).
+   No Docker, no installs, no elevation; fully self-contained AppImage.
+2. Windows: Docker Desktop available + running → Milvus Standalone; without
+   Docker → Qdrant (unchanged).
+3. Linux: Milvus Standalone via Docker is an **optional "advanced" mode**
+   offered in the wizard; Milvus Lite is only a launch-chain fallback gated
+   to Ubuntu >= 20.04 with a clean native import.
+4. If every engine fails → Persian message with the exact per-engine error
+   (traceback + missing shared library) + Retry; never a silent failure.
 
 ### Where files live (no hardcoded paths)
 

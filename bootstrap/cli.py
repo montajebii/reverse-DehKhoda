@@ -8,10 +8,12 @@ Steps:
   report    fast system report + decision table (no side effects)
   prereqs   install missing prerequisites (Docker engine / Docker Desktop /
             WSL2) — every privileged action goes through pkexec / UAC
-  db        start the chosen vector store and wait for health
+  db        start the chosen vector engine and wait for health (runs the
+            automatic fallback chain with per-engine diagnostics)
   model     download e5 weights (or --skip -> hash embedder)
   ingest    Dehkhoda pipeline (resumable)
   health    final store-level health check
+  engine-smoke  hybrid-search capability probe (build gate / container tests)
   state     read/write setup-state.json (--get | --set key=value)
   selftest  offline selftests (detector / installer_linux / pins)
 """
@@ -63,6 +65,16 @@ def step_prereqs(args) -> None:
     em = Emitter("prereqs")
     st = state.load()
     consent = bool(st.get("decisions", {}).get("docker_consent", False))
+
+    # v1.2.1: the default engine (Qdrant) needs NO prerequisites. Docker is
+    # only relevant when the user explicitly picked the advanced Milvus mode.
+    chosen = st.get("backend") or ""
+    if chosen != "milvus":
+        em.result(True, data={"skipped": True,
+                              "reason": "default engine (Qdrant) needs no prereqs",
+                              "backend": chosen or None})
+        return
+
     rep = detector.build_report(consent=True if consent else False)
     backend = rep["backend"]
     needs = set(backend.get("needs") or [])
@@ -146,6 +158,26 @@ def step_db(args) -> None:
         data = backend_launcher.launch(em)
         state.mark_step("database")
         em.result(True, data=data)
+    except backend_launcher.EngineUnavailable as exc:
+        # requirement: NEVER a generic message — carry every attempt's full
+        # traceback + exact missing shared library to the technical log.
+        for a in exc.attempts:
+            em.progress(log=f"[{a.get('engine')}] "
+                            f"{'skipped' if a.get('skipped') else 'FAILED'}: "
+                            f"{a.get('error')}")
+            if a.get("missing_libs"):
+                em.progress(log=f"[{a.get('engine')}] missing shared libraries: "
+                                + ", ".join(a["missing_libs"]))
+            if a.get("traceback"):
+                em.progress(log=a["traceback"][-1500:])
+        import shutil as _shutil
+
+        docker_present = bool(_shutil.which("docker"))
+        em.result(False, error_code="engine_unavailable",
+                  error_fa=("هیچ‌کدام از موتورهای جست‌وجو آماده نشد. جزئیات دقیق هر "
+                            "خطا در «جزئیات فنی» آمده است؛ با «تلاش مجدد» دوباره "
+                            "امتحان کنید."),
+                  data={"attempts": exc.attempts, "docker_available": docker_present})
     except Exception as exc:
         _log_exception(em, exc)
         em.result(False, error_code="db_launch_failed",
@@ -206,6 +238,16 @@ def step_health(args) -> None:
     em.result(True, data=backend_launcher.health_check(em))
 
 
+def step_engine_smoke(args) -> None:
+    """Hybrid-search capability probe — the build/CI gate (exit 1 on fail)."""
+    from . import engine_smoke
+
+    apply_env_from_state()
+    rc = engine_smoke.main_cli(args.engine, args.preferred)
+    if rc != 0:
+        sys.exit(rc)
+
+
 def step_state(args) -> None:
     em = Emitter("state")
     if args.set:
@@ -244,6 +286,7 @@ STEPS = {
     "model": step_model,
     "ingest": step_ingest,
     "health": step_health,
+    "engine-smoke": step_engine_smoke,
     "state": step_state,
     "selftest": step_selftest,
 }
@@ -255,6 +298,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--consent", type=int, default=None, choices=(0, 1))
     ap.add_argument("--skip", action="store_true")
     ap.add_argument("--recreate", action="store_true")
+    ap.add_argument("--engine", default=None,
+                    choices=("qdrant_local", "qdrant_native", "milvus_lite", "milvus"),
+                    help="engine-smoke: force a single engine probe")
+    ap.add_argument("--preferred", default=None,
+                    help="engine-smoke: start the chain at this engine")
     ap.add_argument("--set", dest="set", default=None)
     args = ap.parse_args(argv)
 

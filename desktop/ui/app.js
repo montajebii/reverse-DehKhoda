@@ -80,21 +80,92 @@ async function waitBackend() {
       if (r.ok) {
         const h = await r.json();
         updateStatusFromHealth(h);
+        if (h.engine_error) showEngineError(h.engine_error, h);
         return true;
       }
     } catch (e) { /* backend still starting */ }
     await new Promise((r) => setTimeout(r, 500));
   }
   setStatus("err", "اتصال به موتور ناموفق بود");
+  await showBackendDead();
   return false;
 }
 
 function updateStatusFromHealth(h) {
+  if (h.engine_error) {
+    showEngineError(h.engine_error, h);
+    return;
+  }
   const parts = ["موتور آماده است"];
   if (h.count) parts.push(`${faNum(h.count)} مدخل`);
   if (h.bm25_fitted === false) parts.push("نمایه BM25 در حال ساخت");
   if (h.exact_index_ready === false) parts.push("تطبیق دقیق غیرفعال");
+  if (h.backend && h.backend.backend) parts.push(String(h.backend.backend));
   setStatus(h.status === "ok" ? "on" : "err", parts.join(" • "));
+}
+
+/* ---------------- engine failure diagnostics (never generic) ------------- */
+let engineErrorShown = false;
+
+function techDetails(lines) {
+  const details = el("details", "hit-details");
+  details.appendChild(el("summary", null, "جزئیات فنی"));
+  const pre = el("pre", "hit-full");
+  pre.style.whiteSpace = "pre-wrap";
+  pre.textContent = (lines || []).filter(Boolean).join("\n\n").slice(-4000);
+  details.appendChild(pre);
+  return details;
+}
+
+function showEngineError(engineError, health) {
+  if (engineErrorShown) return;
+  engineErrorShown = true;
+  setStatus("err", "موتور برداری آماده نشد");
+  const backendLabel = health && health.backend && health.backend.backend
+    ? String(health.backend.backend) : "";
+  const missing = engineError.missing_libs && engineError.missing_libs.length
+    ? `کتابخانهٔ گم‌شده: ${engineError.missing_libs.join(", ")}` : "";
+  const c = el("div", "card state-card");
+  c.appendChild(el("div", "icon", "⚠"));
+  c.appendChild(el("p", "state-title", "راه‌اندازی موتور جست‌وجو ناموفق بود"));
+  c.appendChild(el("p", "state-text",
+    esc(`علت دقیق: ${engineError.error || "نامشخص"}${missing ? " — " + missing : ""}`)));
+  c.appendChild(techDetails([
+    engineError.traceback,
+    backendLabel ? `backend: ${backendLabel}` : "",
+  ]));
+  const repair = el("button", "btn-ghost", "تعمیر راه‌اندازی");
+  repair.type = "button";
+  repair.addEventListener("click", async () => {
+    try {
+      const inv = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
+      if (inv) await inv("bootstrap_run", { step: "state", args: ["--set", "complete=false"] });
+    } catch (e) { /* best effort */ }
+    location.replace("wizard.html");
+  });
+  c.appendChild(repair);
+  $results.replaceChildren(c);
+}
+
+async function showBackendDead() {
+  // sidecar never came up — surface the last backend.log lines so the
+  // failure is diagnosable instead of a bare "engine not available".
+  let logTail = "";
+  try {
+    const inv = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
+    if (inv) logTail = await inv("backend_log");
+  } catch (e) { /* bridge unavailable */ }
+  const c = el("div", "card state-card");
+  c.appendChild(el("div", "icon", "⚠"));
+  c.appendChild(el("p", "state-title", "موتور جست‌وجو اجرا نشد"));
+  c.appendChild(el("p", "state-text",
+    "فرایند موتور پاسخ نداد؛ آخرین پیام‌های فنی در زیر آمده است."));
+  c.appendChild(techDetails([logTail]));
+  const repair = el("button", "btn-ghost", "تعمیر راه‌اندازی");
+  repair.type = "button";
+  repair.addEventListener("click", () => location.replace("wizard.html"));
+  c.appendChild(repair);
+  $results.replaceChildren(c);
 }
 
 /* ---------------- rendering ---------------- */
@@ -221,9 +292,8 @@ async function runSearch(query) {
     renderResults(await r.json());
   } catch (e) {
     if (e && e.name === "AbortError") return; // superseded by a newer query
-    $results.replaceChildren(
-      stateCard("⚠", "ارتباط با موتور برقرار نشد", "موتور در دسترس نیست؛ دوباره تلاش کنید.", true)
-    );
+    setStatus("err", "موتور پاسخ نمی‌دهد");
+    await showBackendDead();
   } finally {
     $go.disabled = false;
     inflight = null;

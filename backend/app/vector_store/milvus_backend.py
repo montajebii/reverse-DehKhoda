@@ -32,6 +32,20 @@ class MilvusBackend(VectorStoreBackend):
     def connect(self) -> None:
         from pymilvus import MilvusClient
 
+        # A local .db URI runs through the milvus_lite native engine — its
+        # bundled shared libs must be RTLD_GLOBAL-preloaded BEFORE pymilvus
+        # dlopens them, otherwise the import fails with a bare OSError on
+        # distros lacking libgomp/libgfortran/libopenblas.
+        if str(self.s.milvus_uri).endswith(".db"):
+            try:
+                from bootstrap.native_preload import (  # type: ignore
+                    preload_milvus_lite_libs,
+                )
+
+                preload_milvus_lite_libs(log=lambda m: logger.info("preload: %s", m))
+            except Exception as exc:  # pragma: no cover - bootstrap absent in tests
+                logger.warning("milvus_lite preload unavailable: %s", exc)
+
         self._client = MilvusClient(
             uri=self.s.milvus_uri,
             token=self.s.milvus_token or None,

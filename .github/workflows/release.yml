@@ -8,6 +8,9 @@ on:
 permissions:
   contents: write
 
+env:
+  VERSION: "1.2.1"
+
 jobs:
   # ================================================== Linux container tests
   container-tests:
@@ -35,16 +38,14 @@ jobs:
             echo "=== real engine install (package names must exist) ==="
             python3 bootstrap/tests/test_installer_linux.py --real
           '
-      - name: "Milvus Lite wheel verification (decision-table rule 3, build time)"
+      - name: "Milvus Lite wheel verification (Linux x86_64 + py3.12)"
         run: |
           docker run --rm -v "$PWD":/repo -w /repo python:3.12-slim bash -c '
             set -e
             # pymilvus alone is NOT enough: MilvusClient(uri="*.db") local mode
-            # requires the separate milvus-lite embedded engine. This step exists
-            # precisely to prove a stable wheel ships for linux-x86_64 + py3.12
-            # (decision-table rule 3). If this install fails, Milvus Lite is
-            # unavailable on this platform and the wizard must fall back to
-            # qdrant_native instead of silently assuming the wheel exists.
+            # requires the separate milvus-lite embedded engine. If this install
+            # fails, Milvus Lite is unavailable and the launch chain falls back
+            # to Qdrant instead of silently assuming the wheel exists.
             pip install --quiet pymilvus milvus-lite
             python3 /repo/bootstrap/tests/test_milvus_lite.py
           '
@@ -78,42 +79,108 @@ jobs:
           if ($j.docker.installed -ne $false) { Write-Error "expected docker absent"; exit 1 }
           if ($j.ok -ne $true) { Write-Error "detect failed"; exit 1 }
           Write-Host "no-docker scenario OK"
-      - name: "Decision table: Windows + docker declined -> qdrant_native"
+      - name: "Decision table: Windows + docker declined -> qdrant_native; Linux default -> qdrant"
         run: python bootstrap/tests/test_decision_table.py
 
   # ================================================== Linux packages
+  # Built INSIDE a debian:12 container so the bundled binaries link against
+  # glibc 2.36 — the oldest of our supported targets (Debian 12, Ubuntu
+  # 22.04+, Arch, Fedora). Binaries built on newer glibc would refuse to run
+  # on Debian 12 ("GLIBC_2.38 not found") — one of the root causes of the
+  # v1.2.0 "engine is not available" reports.
   build-linux:
-    name: packages (linux)
+    name: packages (linux, debian-12 container)
     runs-on: ubuntu-latest
+    container:
+      image: python:3.12-slim-bookworm
     steps:
+      - name: System deps (git, node, rust, Tauri, AppImage tooling)
+        run: |
+          set -e
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            git curl xz-utils ca-certificates build-essential pkg-config \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev patchelf file libfuse2 zstd
+          # Node 20 (binary tarball; nodesource not needed)
+          curl -fsSL https://nodejs.org/dist/v20.18.1/node-v20.18.1-linux-x64.tar.xz \
+            | tar -xJ -C /usr/local --strip-components=1
+          # Rust (stable, minimal profile)
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain stable --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-      - uses: dtolnay/rust-toolchain@stable
       - name: Install Python deps (PyInstaller + backend)
         run: |
           python -m pip install --upgrade pip
           python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
           python -m pip install -r backend/requirements.txt pyinstaller
-      - name: Linux system deps (Tauri + AppImage)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
-            libayatana-appindicator3-dev librsvg2-dev patchelf libfuse2
-      - name: Backend + AppImage + deb (+ pinned qdrant)
+      - name: Backend + AppImage + deb (+ bundled qdrant sidecar)
         run: bash installer/linux/appimage.sh
         env:
           DEHKHODA_BUNDLE_PROFILE: full
-          # GitHub runners have no /dev/fuse, so AppImage-based tools
-          # (linuxdeploy, linuxdeploy-plugin-appimage, AppRun) cannot mount
-          # themselves and fail with "failed to run linuxdeploy". Extract-
-          # and-run mode sidesteps FUSE entirely.
+          # no /dev/fuse anywhere on CI — extract-and-run sidesteps FUSE for
+          # the AppImage-based bundler tools (linuxdeploy, appimagetool)
           APPIMAGE_EXTRACT_AND_RUN: "1"
+      - name: "Build gate: engine smoke — default chain (qdrant local)"
+        run: |
+          BIN=backend/dist/dehkhoda-server/dehkhoda-server
+          export DEHKHODA_DATA_DIR=/tmp/dh-ci
+          "$BIN" bootstrap --step engine-smoke 2>&1 | tail -1 | tee /tmp/smoke-chain.json
+          grep -q '"ok": *true' /tmp/smoke-chain.json
+          grep -q 'hybrid_hits' /tmp/smoke-chain.json
+      - name: "Build gate: engine smoke — bundled qdrant SIDECAR binary"
+        run: |
+          BIN=backend/dist/dehkhoda-server/dehkhoda-server
+          export DEHKHODA_DATA_DIR=/tmp/dh-ci
+          export DEHKHODA_QDRANT_BINARY="$PWD/desktop/src-tauri/resources/sidecars/qdrant/qdrant"
+          "$BIN" bootstrap --step engine-smoke --engine qdrant_native 2>&1 | tail -1 | tee /tmp/smoke-sidecar.json
+          grep -q '"ok": *true' /tmp/smoke-sidecar.json
+      - name: "Build gate: milvus_lite packaged-binary smoke (Ubuntu engine rule)"
+        run: |
+          BIN=backend/dist/dehkhoda-server/dehkhoda-server
+          export DEHKHODA_DATA_DIR=/tmp/dh-ci
+          "$BIN" bootstrap --step engine-smoke --engine milvus_lite 2>&1 | tail -1 | tee /tmp/smoke-lite.json
+          grep -q '"ok": *true' /tmp/smoke-lite.json
+      - name: CLI selftest on the bundled sidecar
+        run: |
+          BIN=backend/dist/dehkhoda-server/dehkhoda-server
+          DEHKHODA_DATA_DIR=/tmp/dh-ci "$BIN" bootstrap --step selftest | tail -1 | grep -q '"ok": *true'
+          DEHKHODA_DATA_DIR=/tmp/dh-ci "$BIN" bootstrap --step report | tail -1 | grep -q '"ok": *true'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dehkhoda-linux
+          path: |
+            dist-linux/*.AppImage
+            dist-linux/*.deb
+            dist-linux/SHA256SUMS
+          retention-days: 14
+
+  # ================================================== Linux acceptance tests
+  # Runs the PACKAGED AppImage inside clean distro containers (requirement 5):
+  # extracts it, boots the bundled backend engine, and asserts that the
+  # engine reports ready AND a real hybrid (dense+sparse+RRF) search returns
+  # hits — no external package installation inside the test containers.
+  linux-acceptance:
+    name: appimage-acceptance (${{ matrix.image }})
+    needs: [build-linux]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: ubuntu:24.04
+          - image: debian:12
+          - image: fedora:latest
+          - image: archlinux:base-devel
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dehkhoda-linux
+          path: dist-linux
       - name: Arch package (.pkg.tar.zst)
+        if: matrix.image == 'archlinux:base-devel'
         run: |
           docker run --rm -v "$PWD":/repo -w /repo archlinux:base-devel bash -c '
             set -e
@@ -123,22 +190,46 @@ jobs:
             # ar fails with "No such file: dist-linux/Dehkhoda".
             bash installer/linux/arch.sh "$(ls -t dist-linux/*.deb | head -1)"
           '
-      - name: CLI selftest on the bundled sidecar
+      - name: "Acceptance: extract AppImage, boot engine, hybrid search (${{ matrix.image }})"
         run: |
-          BIN=backend/dist/dehkhoda-server/dehkhoda-server
-          DEHKHODA_DATA_DIR=/tmp/dh-ci "$BIN" bootstrap --step selftest | tail -1 | grep -q '"ok": *true'
-          DEHKHODA_DATA_DIR=/tmp/dh-ci "$BIN" bootstrap --step report | tail -1 | grep -q '"ok": *true'
-      - name: SHA256 checksums
+          docker run --rm -v "$PWD":/repo -w /repo ${{ matrix.image }} bash -c '
+            set -e
+            APPIMAGE=$(ls /repo/dist-linux/*.AppImage | head -1)
+            chmod +x "$APPIMAGE"
+            # self-extracting mode: needs no FUSE, no privileges, nothing installed
+            "$APPIMAGE" --appimage-extract >/dev/null
+            BIN=$(find squashfs-root -type f -name dehkhoda-server | head -1)
+            [ -n "$BIN" ] || { echo "backend binary not found in AppImage"; exit 1; }
+            chmod +x "$BIN"
+            QDRANT=$(find squashfs-root -type f -name qdrant | head -1)
+            [ -n "$QDRANT" ] || { echo "qdrant sidecar not bundled in AppImage"; exit 1; }
+            chmod +x "$QDRANT"
+            export DEHKHODA_DATA_DIR=/tmp/dh-ci
+            export DEHKHODA_QDRANT_BINARY="$QDRANT"
+            echo "=== acceptance 1: default engine chain must become ready ==="
+            OUT=$("$BIN" bootstrap --step engine-smoke 2>/dev/null | tail -1)
+            echo "$OUT"
+            echo "$OUT" | grep -q "\"ok\": *true" || { echo "engine did not become ready"; exit 1; }
+            echo "$OUT" | grep -q "hybrid_hits" || { echo "no hybrid search result"; exit 1; }
+            echo "=== acceptance 2: bundled qdrant SIDECAR must serve hybrid search ==="
+            OUT2=$("$BIN" bootstrap --step engine-smoke --engine qdrant_native 2>/dev/null | tail -1)
+            echo "$OUT2"
+            echo "$OUT2" | grep -q "\"ok\": *true" || { echo "qdrant sidecar probe failed"; exit 1; }
+            echo "ACCEPTANCE OK ($0)"
+          '
+      - name: SHA256 checksums (incl. arch package)
+        if: matrix.image == 'archlinux:base-devel'
         run: |
           cd dist-linux
-          sha256sum *.AppImage *.deb *.pkg.tar.zst > SHA256SUMS
+          sha256sum ./*.AppImage ./*.deb ./*.pkg.tar.zst > SHA256SUMS
           cat SHA256SUMS
+      # Separate artifact: upload-artifact v4 overwrite=true REPLACES the
+      # whole artifact (it would destroy the AppImage + deb from build-linux).
       - uses: actions/upload-artifact@v4
+        if: matrix.image == 'archlinux:base-devel'
         with:
-          name: dehkhoda-linux
+          name: dehkhoda-linux-arch
           path: |
-            dist-linux/*.AppImage
-            dist-linux/*.deb
             dist-linux/*.pkg.tar.zst
             dist-linux/SHA256SUMS
           retention-days: 14
@@ -165,7 +256,7 @@ jobs:
           cd backend
           DEHKHODA_BUNDLE_MODE=onedir DEHKHODA_BUNDLE_PROFILE=full \
             python -m PyInstaller --noconfirm --clean --distpath dist --workpath build dehkhoda-server.spec
-      - name: Fetch pinned qdrant.exe sidecar
+      - name: Fetch pinned qdrant.exe sidecar (plain + externalBin triple name)
         shell: bash
         run: |
           mkdir -p desktop/src-tauri/resources/sidecars/qdrant
@@ -184,7 +275,10 @@ jobs:
               with zf.open(src) as s, open(out, "wb") as d:
                   shutil.copyfileobj(s, d)
           dest.unlink()
-          print("qdrant.exe ready:", out.stat().st_size, "bytes")
+          # tauri.conf.json bundle.externalBin requires the target-triple name
+          triple = Path("desktop/src-tauri/resources/sidecars/qdrant/qdrant-x86_64-pc-windows-msvc.exe")
+          shutil.copyfile(out, triple)
+          print("qdrant.exe ready:", out.stat().st_size, "bytes (+ triple copy)")
           PY
       - name: Bundle resources + Tauri build (no bundler)
         shell: bash
@@ -193,6 +287,13 @@ jobs:
           rm -rf desktop/src-tauri/resources/dehkhoda-server/*
           cp -r backend/dist/dehkhoda-server/. desktop/src-tauri/resources/dehkhoda-server/
           cd desktop && npm install --no-fund --no-audit && npx tauri build --no-bundle
+      - name: "Build gate: engine smoke (qdrant default) on the packaged sidecar"
+        shell: bash
+        run: |
+          BIN=backend/dist/dehkhoda-server/dehkhoda-server.exe
+          export DEHKHODA_DATA_DIR="$PWD/.dh-ci"
+          export DEHKHODA_QDRANT_BINARY="$PWD/desktop/src-tauri/resources/sidecars/qdrant/qdrant.exe"
+          "$BIN" bootstrap --step engine-smoke 2>/dev/null | tail -1 | grep -q '"ok": *true'
       - name: Compile NSIS installer
         shell: pwsh
         run: |
@@ -205,9 +306,9 @@ jobs:
             -DAPP_EXE="$exe" `
             -DBACKEND_DIR="$PWD/desktop/src-tauri/resources/dehkhoda-server" `
             -DQDRANT_DIR="$PWD/desktop/src-tauri/resources/sidecars/qdrant" `
-            -DVERSION="1.2.0" installer/windows/nsis.nsi
+            -DVERSION="${{ env.VERSION }}" installer/windows/nsis.nsi
           # NSIS resolves OutFile relative to the script's directory, so the
-          # installer lands at installer\windows\dehkhoda-setup-win-1.2.0.exe.
+          # installer lands at installer\windows\dehkhoda-setup-win-<v>.exe.
           # The Sign + SHA256 steps below reference it there.
       - name: Sign installer (if certificate secret present)
         if: env.WINDOWS_CERTIFICATE != ''
@@ -222,38 +323,33 @@ jobs:
             Select-Object -First 1 -ExpandProperty FullName
           & $signtool sign /f $pfx /p "$env:WINDOWS_CERTIFICATE_PASSWORD" `
             /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
-            "installer/windows/dehkhoda-setup-win-1.2.0.exe"
+            "installer/windows/dehkhoda-setup-win-${{ env.VERSION }}.exe"
           Remove-Item $pfx
-      - name: CLI selftest on the bundled sidecar
-        shell: bash
-        run: |
-          BIN=backend/dist/dehkhoda-server/dehkhoda-server.exe
-          DEHKHODA_DATA_DIR="$PWD/.dh-ci" "$BIN" bootstrap --step selftest | tail -1 | grep -q '"ok": *true'
       - name: SHA256 + collect
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist-win | Out-Null
           # NSIS writes OutFile next to the .nsi script (installer/windows/).
-          $setup = "installer/windows/dehkhoda-setup-win-1.2.0.exe"
+          $setup = "installer/windows/dehkhoda-setup-win-${{ env.VERSION }}.exe"
           if (-not (Test-Path $setup)) {
             Write-Error "installer not found at $setup"; exit 1
           }
           Copy-Item $setup dist-win/
-          $h = (Get-FileHash "dist-win\dehkhoda-setup-win-1.2.0.exe" -Algorithm SHA256).Hash.ToLower()
-          "$h  dehkhoda-setup-win-1.2.0.exe" | Set-Content dist-win\SHA256SUMS.txt
+          $h = (Get-FileHash "dist-win\dehkhoda-setup-win-${{ env.VERSION }}.exe" -Algorithm SHA256).Hash.ToLower()
+          "$h  dehkhoda-setup-win-${{ env.VERSION }}.exe" | Set-Content dist-win\SHA256SUMS.txt
           Get-Content dist-win\SHA256SUMS.txt
       - uses: actions/upload-artifact@v4
         with:
           name: dehkhoda-windows
           path: |
-            dist-win/dehkhoda-setup-win-1.2.0.exe
+            dist-win/dehkhoda-setup-win-${{ env.VERSION }}.exe
             dist-win/SHA256SUMS.txt
           retention-days: 14
 
   # ================================================== GitHub Release
   release:
     name: github-release
-    needs: [container-tests, windows-bootstrap, build-linux, build-windows]
+    needs: [container-tests, windows-bootstrap, build-linux, linux-acceptance, build-windows]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
@@ -261,6 +357,10 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: dehkhoda-linux
+          path: rel
+      - uses: actions/download-artifact@v4
+        with:
+          name: dehkhoda-linux-arch
           path: rel
       - uses: actions/download-artifact@v4
         with:

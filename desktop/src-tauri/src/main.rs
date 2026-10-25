@@ -104,6 +104,61 @@ fn sidecar_exe(dir: &std::path::Path) -> std::path::PathBuf {
     dir.join(name)
 }
 
+/// Resolve the bundled Qdrant engine binary (tauri.conf.json bundle.externalBin).
+///
+/// Tauri installs external binaries next to the main executable; we also
+/// check the resource dir as a fallback. The resolved path is passed to the
+/// Python launcher via DEHKHODA_QDRANT_BINARY so the engine chain always
+/// finds the bundled sidecar without network downloads.
+fn qdrant_sidecar_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "windows")]
+    let name = "qdrant.exe";
+    #[cfg(not(target_os = "windows"))]
+    let name = "qdrant";
+
+    let mut cands: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            cands.push(dir.join(name));
+        }
+    }
+    if let Ok(rd) = app.path().resource_dir() {
+        cands.push(rd.join("sidecars").join("qdrant").join(name));
+    }
+    cands.into_iter().find(|p| p.exists())
+}
+
+fn logs_dir() -> std::path::PathBuf {
+    let d = data_dir().join("logs");
+    let _ = std::fs::create_dir_all(&d);
+    d
+}
+
+fn open_backend_log() -> std::fs::File {
+    let path = logs_dir().join("backend.log");
+    std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&path)
+        .unwrap_or_else(|e| panic!("cannot open backend log {}: {e}", path.display()))
+}
+
+fn spawn_cmd(app: &tauri::AppHandle, bin: &std::path::Path, args: &[String]) -> Command {
+    let mut cmd = Command::new(bin);
+    cmd.args(args);
+    cmd.env("DEHKHODA_DATA_DIR", data_dir());
+    if let Some(q) = qdrant_sidecar_path(app) {
+        cmd.env("DEHKHODA_QDRANT_BINARY", &q);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // 0x08000000 = CREATE_NO_WINDOW — never flash a shell window
+        cmd.creation_flags(0x0800_0000);
+    }
+    cmd
+}
+
 fn find_dev_sidecar(mut p: std::path::PathBuf) -> Option<std::path::PathBuf> {
     // Dev fallback: backend/dist/dehkhoda-server/ relative to repo root.
     for _ in 0..4 {
@@ -145,11 +200,15 @@ fn spawn_backend(app: &tauri::AppHandle, port: u16) -> Result<Child, String> {
         )
     };
     let args = vec!["--port".to_string(), port.to_string()];
-    let mut cmd = spawn_cmd(&bin, &args);
+    let mut cmd = spawn_cmd(app, &bin, &args);
     if let Some(d) = cwd {
         cmd.current_dir(d);
     }
-    cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    // stdout/stderr -> data_dir/logs/backend.log so engine failures are
+    // diagnosable from the UI (never a bare "engine is not available").
+    let log = open_backend_log();
+    let err_log = log.try_clone().map_err(|e| format!("clone log handle: {e}"))?;
+    cmd.stdout(Stdio::from(log)).stderr(Stdio::from(err_log));
     cmd.spawn().map_err(|e| format!("spawn sidecar: {e}"))
 }
 
@@ -225,6 +284,20 @@ fn start_backend(app: tauri::AppHandle, state: State<SidecarState>) -> BackendSt
     BackendStatus { port: Some(port), ready: false }
 }
 
+/// Tail of data_dir/logs/backend.log (engine diagnostics for the UI).
+#[tauri::command]
+fn backend_log() -> String {
+    let path = logs_dir().join("backend.log");
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            const MAX: usize = 48 * 1024;
+            let slice = if bytes.len() > MAX { &bytes[bytes.len() - MAX..] } else { &bytes[..] };
+            String::from_utf8_lossy(slice).into_owned()
+        }
+        Err(_) => String::new(),
+    }
+}
+
 /// Run one wizard bootstrap step: spawn the sidecar in bootstrap mode and
 /// stream its JSONL events to the UI via the `wizard-event` channel.
 /// Returns the terminal {"t":"result",...} line (raw JSON string) or an
@@ -273,11 +346,11 @@ fn run_bootstrap_blocking(
 
     let mut cargs: Vec<String> = vec!["bootstrap".into(), "--step".into(), step];
     cargs.extend(extra);
-    let mut cmd = spawn_cmd(&bin, &cargs);
+    let mut cmd = spawn_cmd(&app, &bin, &cargs);
     if let Some(d) = cwd {
         cmd.current_dir(d);
     }
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.stdout(Stdio::piped()).stderr(Stdio::from(open_backend_log()));
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
@@ -368,7 +441,8 @@ fn main() {
             backend_status,
             setup_state,
             start_backend,
-            bootstrap_run
+            bootstrap_run,
+            backend_log
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

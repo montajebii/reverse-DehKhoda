@@ -19,15 +19,19 @@ import sys
 def main() -> int:
     argv = sys.argv[1:]
 
+    # Dev-mode imports: backend/ (for app.*) and the repo root (for
+    # bootstrap.*). The frozen bundle ships both, so this is a no-op there.
+    if not getattr(sys, "frozen", False):
+        from pathlib import Path
+
+        _root = Path(__file__).resolve().parent.parent.parent
+        _backend = Path(__file__).resolve().parent.parent
+        for p in (_root, _backend):
+            if p.is_dir() and str(p) not in sys.path:
+                sys.path.insert(0, str(p))
+
     # ---- bootstrap CLI (wizard steps; stdout = JSONL events) --------------
     if argv and argv[0] == "bootstrap":
-        if not getattr(sys, "frozen", False):
-            from pathlib import Path
-
-            root = Path(__file__).resolve().parent.parent.parent
-            for p in (root, Path(__file__).resolve().parent.parent):
-                if p.is_dir() and str(p) not in sys.path:
-                    sys.path.insert(0, str(p))
         from bootstrap.cli import main as bootstrap_main
 
         return bootstrap_main(argv[1:])
