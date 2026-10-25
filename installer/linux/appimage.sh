@@ -30,40 +30,31 @@ fi
 [ -x "${ROOT}/backend/dist/dehkhoda-server/dehkhoda-server" ] || {
   log "backend binary missing"; exit 1; }
 
-# ---------------------------------------------------------------- 1b. gfortran
+# ---------------------------------------------------------------- 1b. shared libs
 # numpy/scipy/torch wheels ship shared libraries with build-specific hash
-# suffixes in their filenames (e.g. libgfortran-83c28eba.so.5.0.0,
-# libgomp-e985bcbb.so.1.0.0, libopenblas-*.so*, libquadmath-*.so*).
+# suffixes (libgfortran-83c28eba.so.5.0.0, libgomp-e985bcbb.so.1.0.0) or
+# in non-standard directories (torch/lib/libtorch.so, torch/lib/libc10.so).
 # PyInstaller bundles the Python extension .so files (which carry DT_NEEDED
-# entries for these hashed names) but does NOT always bundle the libraries
-# themselves. linuxdeploy then scans the bundle, sees the DT_NEEDED, can't
-# resolve the hashed filename from system paths, and aborts:
+# entries for these names) but does NOT always bundle the libraries
+# themselves. linuxdeploy then can't resolve them from system paths and
+# aborts:
+#   ERROR: Could not find dependency: libtorch.so
 #   ERROR: Could not find dependency: libgomp-e985bcbb.so.1.0.0
 #
-# Fix: find ALL .so* files inside every *.libs/ directory in the Python
-# toolcache (numpy.libs, scipy.libs, torch/lib, etc.) and symlink them into
+# Fix: symlink EVERY lib*.so* file found in the Python site-packages into
 # /usr/lib/x86_64-linux-gnu/ so linuxdeploy can resolve any hash variant
-# from the system library path. Also copy them into the bundle as fallback.
+# or non-standard lib (torch, numpy.libs, scipy.libs) from the system
+# library path. Also copy them into the bundle as a fallback.
 BUNDLE_LIBS="${ROOT}/backend/dist/dehkhoda-server/_internal"
 SYS_LIB=/usr/lib/x86_64-linux-gnu
-# (a) Everything in *.libs/ directories (the canonical pip-wheel location)
-find /opt/hostedtoolcache -type d -name '*.libs' 2>/dev/null | while read -r libdir; do
-  find "$libdir" -name '*.so*' 2>/dev/null | while read -r lib; do
-    [ -f "$lib" ] || continue
-    sudo ln -sf "$lib" "${SYS_LIB}/$(basename "$lib")" 2>/dev/null || true
-    [ -d "$BUNDLE_LIBS" ] && cp -n "$lib" "$BUNDLE_LIBS/" 2>/dev/null || true
-  done
-done
-# (b) Explicit patterns for libs that may live outside .libs/ dirs
-for pat in libgomp-*.so* libgfortran-*.so* libopenblas-*.so* libquadmath-*.so*; do
-  find /opt/hostedtoolcache -name "$pat" 2>/dev/null | while read -r lib; do
-    [ -f "$lib" ] || continue
-    sudo ln -sf "$lib" "${SYS_LIB}/$(basename "$lib")" 2>/dev/null || true
-    [ -d "$BUNDLE_LIBS" ] && cp -n "$lib" "$BUNDLE_LIBS/" 2>/dev/null || true
-  done
+COUNT=0
+find /opt/hostedtoolcache/Python -path '*/site-packages/*' -name 'lib*.so*' 2>/dev/null | while read -r lib; do
+  [ -f "$lib" ] || continue
+  sudo ln -sf "$lib" "${SYS_LIB}/$(basename "$lib")" 2>/dev/null || true
+  [ -d "$BUNDLE_LIBS" ] && cp -n "$lib" "$BUNDLE_LIBS/" 2>/dev/null || true
 done
 sudo ldconfig 2>/dev/null || true
-log "numpy/scipy/torch hash-named libraries symlinked to ${SYS_LIB}"
+log "shared libraries from site-packages symlinked to ${SYS_LIB}"
 
 # ---------------------------------------------------------------- 2. qdrant
 log "fetching pinned qdrant sidecar (${ARCH})"
