@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Dehkhoda RAG",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "identifier": "ir.dehkhoda.rag",
   "build": {
     "frontendDist": "../ui"
@@ -9,7 +9,7 @@
   "app": {
     "windows": [
       {
-        "title": "دهخدا — جست‌وجوی معنایی",
+        "title": "دهخدا — واژه‌یاب معنایی",
         "width": 1040,
         "height": 760,
         "minWidth": 640,

@@ -1,8 +1,8 @@
 {
   "name": "dehkhoda-desktop",
   "private": true,
-  "version": "1.0.0",
-  "description": "Tauri v2 shell for the Dehkhoda RAG sidecar",
+  "version": "1.1.0",
+  "description": "Tauri v2 shell for the Dehkhoda reverse dictionary",
   "scripts": {
     "tauri": "tauri"
   },

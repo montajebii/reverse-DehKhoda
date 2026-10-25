@@ -31,3 +31,6 @@ upload/
 download/
 worklog.md
 scripts/verify_stage*.py
+
+# Sandbox dev tools (not part of the deliverable)
+devtools/

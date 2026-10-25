@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 from typing import Iterable, Iterator, Optional
 
+from ..analyzers.persian import headword_key
 from ..analyzers.persian import PersianAnalyzer
 from ..embeddings.provider import EmbeddingProvider
 from ..search.bm25 import BM25Encoder
@@ -32,6 +33,9 @@ DUMP_FILES = [
     "31-Vav", "32-He", "33-Ye",
 ]
 EXPECTED_ROWS = 312_507
+# The source dump contains exactly one row with an empty meaning, which the
+# loader filters out; a complete staging DB therefore holds EXPECTED_ROWS - 1.
+USABLE_ROWS = EXPECTED_ROWS - 1
 
 _SENT_SPLIT_RE = None  # built lazily
 
@@ -76,26 +80,39 @@ class DehkhodaLoader:
                 id INTEGER PRIMARY KEY,
                 word TEXT NOT NULL,
                 meaning_clean TEXT NOT NULL,
-                doc TEXT NOT NULL
+                doc TEXT NOT NULL,
+                word_norm TEXT
             )
             """
         )
         con.commit()
         return con
 
+    @staticmethod
+    def _ensure_word_norm_column(con: sqlite3.Connection) -> bool:
+        """Migrate pre-1.1 staging DBs: add the `word_norm` column if missing.
+        Returns True when a migration was performed."""
+        cols = {row[1] for row in con.execute("PRAGMA table_info(words)")}
+        if "word_norm" in cols:
+            return False
+        con.execute("ALTER TABLE words ADD COLUMN word_norm TEXT")
+        con.commit()
+        return True
+
     def import_to_staging(
         self, dumps: Optional[Iterable[Path]] = None, batch: int = 10_000
     ) -> int:
         """Parse dumps into the SQLite staging DB. Skips work if already full."""
         con = self._staging_conn()
+        self._ensure_word_norm_column(con)
         have = con.execute("SELECT COUNT(*) FROM words").fetchone()[0]
-        if have >= EXPECTED_ROWS:
+        if have >= USABLE_ROWS:
             logger.info("staging already complete (%d rows) — skipping import", have)
             con.close()
             return have
-        con.execute("DELETE FROM words")
-
+        # only fetch the 52 MB of dumps when staging actually needs (re)building
         files = list(dumps) if dumps is not None else self.download_dumps()
+        con.execute("DELETE FROM words")
         t0, total, buf = time.time(), 0, []
         for path in files:
             logger.info("parsing %s", path)
@@ -104,7 +121,13 @@ class DehkhodaLoader:
                 if not cleaned:
                     continue  # skip the single empty-meaning row
                 buf.append(
-                    (entry.id, entry.word, cleaned, make_document(entry.word, cleaned))
+                    (
+                        entry.id,
+                        entry.word,
+                        cleaned,
+                        make_document(entry.word, cleaned),
+                        headword_key(entry.word),
+                    )
                 )
                 if len(buf) >= batch:
                     total += self._stage_flush(con, buf)
@@ -118,7 +141,8 @@ class DehkhodaLoader:
     @staticmethod
     def _stage_flush(con: sqlite3.Connection, buf: list[tuple]) -> int:
         con.executemany(
-            "INSERT OR REPLACE INTO words (id, word, meaning_clean, doc) VALUES (?,?,?,?)",
+            "INSERT OR REPLACE INTO words (id, word, meaning_clean, doc, word_norm)"
+            " VALUES (?,?,?,?,?)",
             buf,
         )
         con.commit()
@@ -147,6 +171,77 @@ class DehkhodaLoader:
                     ",".join("?" * len(part))
                 for row in con.execute(q, part):
                     yield row
+        finally:
+            con.close()
+
+    # -- reverse-dictionary lookups ---------------------------------------------
+    def ensure_word_norm_index(self) -> bool:
+        """Backfill word_norm (pre-1.1 staging DBs) and create the lookup index.
+
+        Safe to call at every startup: with the column and index in place it is
+        two cheap queries.  Returns True when the index is ready for use.
+        """
+        if not Path(self.s.staging_db_path).exists():
+            return False
+        con = self._staging_conn()
+        try:
+            migrated = self._ensure_word_norm_column(con)
+            if migrated:
+                t0 = time.time()
+                rows = con.execute("SELECT id, word FROM words").fetchall()
+                con.executemany(
+                    "UPDATE words SET word_norm = ? WHERE id = ?",
+                    [(headword_key(w), wid) for wid, w in rows],
+                )
+                con.commit()
+                logger.info(
+                    "word_norm backfill: %d rows in %.1fs", len(rows), time.time() - t0
+                )
+            con.execute(
+                "CREATE INDEX IF NOT EXISTS idx_words_norm ON words(word_norm)"
+            )
+            con.commit()
+            return True
+        except Exception as exc:
+            logger.warning("word_norm index unavailable: %s", exc)
+            return False
+        finally:
+            con.close()
+
+    def find_exact(self, key: str) -> Optional[tuple[int, str, str]]:
+        """Exact headword lookup by canonical key -> (id, word, meaning_clean).
+        Picks the lowest row id when several entries share the headword."""
+        if not key or not Path(self.s.staging_db_path).exists():
+            return None
+        con = self._staging_conn()
+        try:
+            row = con.execute(
+                "SELECT id, word, meaning_clean FROM words WHERE word_norm = ?"
+                " ORDER BY id LIMIT 1",
+                (key,),
+            ).fetchone()
+            return (int(row[0]), row[1], row[2]) if row else None
+        except sqlite3.Error:
+            return None
+        finally:
+            con.close()
+
+    def fetch_meanings(self, word_ids: list[int]) -> dict[int, str]:
+        """Full cleaned definitions for staging row ids (chunked IN queries)."""
+        out: dict[int, str] = {}
+        if not word_ids or not Path(self.s.staging_db_path).exists():
+            return out
+        con = self._staging_conn()
+        try:
+            for i in range(0, len(word_ids), 500):
+                part = word_ids[i : i + 500]
+                q = "SELECT id, meaning_clean FROM words WHERE id IN (%s)" % \
+                    ",".join("?" * len(part))
+                for wid, meaning in con.execute(q, part):
+                    out[int(wid)] = meaning
+            return out
+        except sqlite3.Error:
+            return out
         finally:
             con.close()
 
@@ -224,8 +319,11 @@ class DehkhodaLoader:
                 for ci, part in enumerate(parts):
                     chunked.append((word_id, word, ci, part, make_document(word, part)))
             entries += len(batch_rows)
-            dense = self.embedder.embed_documents([c[4] for c in chunked])
-            sparse = self.bm25.encode_documents([c[4] for c in chunked])
+            # REVERSE DICTIONARY (v1.1): dense + sparse vectors are generated
+            # from the DEFINITION text only — the headword stays a stored
+            # payload field so retrieval matches meanings, not word forms.
+            dense = self.embedder.embed_documents([c[3] for c in chunked])
+            sparse = self.bm25.encode_documents([c[3] for c in chunked])
             records = [
                 Record(
                     doc_id=f"w{wid}c{ci}",

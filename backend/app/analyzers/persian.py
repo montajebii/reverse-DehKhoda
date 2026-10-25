@@ -50,6 +50,23 @@ def regex_normalize(text: str) -> str:
     return text.strip()
 
 
+_HW_STRIP_RE = re.compile(r"[\s\u200c\u200e\u200f\u202a-\u202e]+")
+
+
+def headword_key(text: str) -> str:
+    """Canonical headword key for exact-match lookup and result grouping.
+
+    MUST be engine-independent (deterministic across hazm/parsivar/regex) so
+    keys written at ingestion time always match keys computed at search time.
+    Pipeline: Arabic->Persian folding, diacritics/tatweel stripped, digits
+    mapped, ALL whitespace/ZWNJ/bidi-marks removed, edge punctuation trimmed.
+    Examples:  «سُودا» -> «سودا»,  «می‌ روم» -> «میروم»,  «كتاب» -> «کتاب».
+    """
+    t = regex_normalize(text)
+    t = _HW_STRIP_RE.sub("", t)
+    return t.strip(".,،؛:!?()[]{}«»\"'ـ*…-–—")
+
+
 def regex_tokenize(text: str) -> List[str]:
     return _TOKEN_RE.findall(text)
 

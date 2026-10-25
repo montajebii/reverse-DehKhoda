@@ -62,3 +62,37 @@ def test_hazm_unavailable_falls_back():
 
 def test_regex_normalize_no_dependency():
     assert regex_normalize("كِتـاب") == "کتاب"
+
+
+# --- headword_key: canonical keys for exact fallback + grouping ---------------
+
+def test_headword_key_strips_diacritics_and_marks():
+    from app.analyzers.persian import headword_key
+
+    assert headword_key("سُودا") == "سودا"
+    assert headword_key("عِشق") == "عشق"
+    assert headword_key("کتـابِ") == "کتاب"
+
+
+def test_headword_key_removes_whitespace_and_zwnj():
+    from app.analyzers.persian import headword_key
+
+    assert headword_key("می‌ روم") == "میروم"
+    assert headword_key("  عشق  ") == "عشق"
+    assert headword_key("عشق.") == "عشق"
+
+
+def test_headword_key_folds_arabic_chars():
+    from app.analyzers.persian import headword_key
+
+    assert headword_key("كتاب") == "کتاب"   # Arabic kaf -> Persian kaf
+    assert headword_key("عـشـق") == "عشق"   # tatweel removed
+
+
+def test_headword_key_is_engine_independent():
+    """The key must be identical regardless of the analyzer engine, because
+    keys written at ingestion time are matched at search time."""
+    from app.analyzers.persian import headword_key, regex_normalize
+
+    for w in ["سُودا", "وسواس", "می‌‌روم", "كِتـابِ", "اضطراب"]:
+        assert headword_key(w) == headword_key(regex_normalize(w))

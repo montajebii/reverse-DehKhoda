@@ -49,3 +49,19 @@ paths. Pairs with `docker-compose.yml`, `backend/requirements*.txt`,
 * PyInstaller — installed at build time only (build machines), `>=6.22`; not
   shipped to users.
 * Test-only deps (`pytest`, `httpx`) — CI convenience, not runtime.
+
+## v1.1.0 — reverse dictionary
+
+No dependency changes; all pins above remain.  Behavioural changes:
+
+* **Embedding text**: dense + BM25 vectors are now generated from the
+  DEFINITION text only (previously `"واژه: …\nتعریف: …"`).  This is a
+  breaking index change — re-run ingestion (`POST /ingest` with
+  `recreate: true`) after upgrading.
+* **Search**: results are grouped/deduplicated by canonical headword key
+  (`analyzers/persian.py: headword_key`, engine-independent) before top-N.
+* **Exact fallback**: a query matching a headword returns that entry
+  directly; backed by a new `word_norm` column + index in the SQLite staging
+  DB (auto-migrated on startup).
+* New settings: `DEHKHODA_SEARCH_OVERFETCH`, `DEHKHODA_SNIPPET_CHARS`,
+  `DEHKHODA_EXACT_FALLBACK` (see `.env.example`).

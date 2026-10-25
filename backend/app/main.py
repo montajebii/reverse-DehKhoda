@@ -27,7 +27,7 @@ from app.search.bm25 import BM25Encoder  # noqa: E402
 from app.search.hybrid import HybridSearchEngine  # noqa: E402
 from app.vector_store import backend_probe  # noqa: E402
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -47,6 +47,8 @@ class AppState:
         self.embedder = None
         self.bm25: Optional[BM25Encoder] = None
         self.engine: Optional[HybridSearchEngine] = None
+        self.loader = None
+        self.exact_index_ready = False
 
 
 state = AppState()
@@ -75,7 +77,16 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("collection ensure failed: %s (set DEHKHODA_DENSE_DIM correctly)", exc)
 
-    state.engine = HybridSearchEngine(s, state.backend, state.embedder, state.bm25, state.analyzer)
+    # Staging-backed helpers (exact headword fallback + full definitions).
+    state.loader = DehkhodaLoader(s, state.analyzer, state.embedder, state.bm25, state.backend)
+    try:
+        state.exact_index_ready = state.loader.ensure_word_norm_index()
+    except Exception as exc:
+        logger.warning("exact-match index unavailable: %s", exc)
+
+    state.engine = HybridSearchEngine(
+        s, state.backend, state.embedder, state.bm25, state.analyzer, loader=state.loader
+    )
     logger.info(
         "dehkhoda-rag ready: backend=%s embedder=%s(dim=%d) analyzer=%s",
         state.backend.name, state.embedder.name, state.embedder.dim, state.analyzer.engine,
@@ -88,9 +99,13 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Dehkhoda RAG API",
+    title="Dehkhoda Reverse Dictionary API",
     version=APP_VERSION,
-    description="Hybrid (dense + BM25-sparse, RRF) search over the Dehkhoda Dictionary",
+    description=(
+        "Reverse dictionary over the Dehkhoda corpus: enter a MEANING or "
+        "description, get the closest headwords (سرواژه). Hybrid dense + "
+        "BM25-sparse retrieval fused with RRF, grouped/deduplicated by headword."
+    ),
     lifespan=lifespan,
 )
 
@@ -113,8 +128,18 @@ except Exception:  # pragma: no cover
 
 
 class SearchRequest(BaseModel):
-    query: str = Field(min_length=1, max_length=2000, examples=["عشق چیست؟"])
-    top_k: Optional[int] = Field(default=None, ge=1, le=50)
+    query: str = Field(
+        min_length=1,
+        max_length=2000,
+        examples=["احساس بی‌قراری و اضطراب", "جرم نورانی آسمان", "عشق"],
+    )
+    top_k: Optional[int] = Field(
+        default=None, ge=1, le=50, description="number of headwords returned"
+    )
+    include_exact: bool = Field(
+        default=True,
+        description="if the query IS a headword, return that entry directly",
+    )
 
 
 class IngestRequest(BaseModel):
@@ -128,10 +153,11 @@ class IngestRequest(BaseModel):
 
 @app.post("/search")
 def search(req: SearchRequest) -> dict[str, Any]:
+    """Reverse lookup: meaning/description in, deduplicated headwords out."""
     if state.engine is None:
         raise HTTPException(status_code=503, detail="engine not ready")
     try:
-        return state.engine.search(req.query, req.top_k)
+        return state.engine.search(req.query, req.top_k, req.include_exact)
     except Exception as exc:
         logger.exception("search failed")
         raise HTTPException(status_code=500, detail=str(exc))
@@ -147,11 +173,12 @@ def ingest(req: IngestRequest) -> dict[str, Any]:
     if state.engine is None:
         raise HTTPException(status_code=503, detail="engine not ready")
     try:
-        loader = DehkhodaLoader(
+        loader = state.loader or DehkhodaLoader(
             state.settings, state.analyzer, state.embedder, state.bm25, state.backend
         )
         dumps = loader.download_dumps(Path(req.source_dir)) if req.source_dir else None
         staged = loader.import_to_staging(dumps)
+        loader.ensure_word_norm_index()
         stats = loader.ingest(
             limit=req.limit,
             recreate=req.recreate,
@@ -180,6 +207,7 @@ def health() -> dict[str, Any]:
         },
         "bm25_fitted": state.bm25.is_fitted if state.bm25 else False,
         "collection": state.settings.collection_name if state.settings else None,
+        "exact_index_ready": state.exact_index_ready,
     }
     if state.backend is not None:
         try:

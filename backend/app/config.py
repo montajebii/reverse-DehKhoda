@@ -55,8 +55,11 @@ class Settings(BaseSettings):
     chunk_chars: int = 1200
     chunk_overlap: int = 150
 
-    # --- search defaults ---
-    top_k: int = 8
+    # --- search defaults (reverse dictionary: meaning -> headwords) ---
+    top_k: int = 8                 # number of headwords returned
+    search_overfetch: int = 6      # chunks fetched per headword before grouping
+    snippet_chars: int = 240       # short definition snippet length
+    exact_fallback: bool = True    # exact headword match returns entry directly
 
     # --- misc ---
     log_level: str = "INFO"

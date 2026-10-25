@@ -1,13 +1,15 @@
-# Dehkhoda RAG — Deployment Guide
+# Dehkhoda Reverse Dictionary — Deployment Guide
 
-Cross-platform Persian RAG over the **Dehkhoda Dictionary** (312,507 entries,
-`github.com/nimah79/Dehkhoda-SQL`). Hybrid retrieval = Dense
+Cross-platform Persian **reverse dictionary** over the Dehkhoda corpus
+(312,507 entries, `github.com/nimah79/Dehkhoda-SQL`): enter a MEANING or
+description, get the closest headwords (سرواژه). Hybrid retrieval = Dense
 (`intfloat/multilingual-e5-base`, 768d) + Sparse (Persian BM25 via
-`pymilvus[model]`), fused with **RRF**.
+`pymilvus[model]`), fused with **RRF** — vectors built from the DEFINITION
+text, results grouped/deduplicated by headword.
 
 ```
 ┌──────────────────────────── Tauri v2 desktop shell ───────────────────────────┐
-│  Persian RTL chat UI (static HTML/JS)                                         │
+│  Persian RTL reverse-search UI (static HTML/JS)                               │
 │      │  fetch http://127.0.0.1:<free-port>                                    │
 │      ▼                                                                        │
 │  PyInstaller sidecar: dehkhoda-server (FastAPI + uvicorn)                     │
@@ -17,8 +19,8 @@ Cross-platform Persian RAG over the **Dehkhoda Dictionary** (312,507 entries,
 │    • Milvus Standalone v2.6.25 (Docker Compose)   ← primary, Linux w/ Docker  │
 │    • Qdrant (embedded / native binary)            ← fallback, Windows no-Docker│
 │                                                                               │
-│  Pipeline: 33 × .sql.gz → SQLite staging → chunk → e5 + BM25 → batch insert   │
-│            (1000–5000) → flush()                                              │
+│  Pipeline: 33 × .sql.gz → SQLite staging → chunk → e5 + BM25 (definitions)    │
+│            → batch insert (1000–5000) → flush()                               │
 └───────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -188,3 +190,21 @@ smoke-tests both OSes and uploads installer artifacts on every push.
   cached under the user's HF cache; subsequent launches are offline.
 * **Windows wheel errors for `milvus-lite`** — expected: it has no Windows
   wheels by design; the Qdrant fallback covers Windows.
+
+---
+
+## Upgrading from v1.0.x (breaking: re-ingest required)
+
+v1.1 turns the app into a **reverse dictionary**: dense + BM25 vectors are
+now generated from the **definition text only** (v1.0 embedded the
+`واژه: …\nتعریف: …` document), and results are grouped by headword. After
+upgrading the sidecar:
+
+1. Start the app once — the staging DB gains a `word_norm` column +
+   index automatically (exact-match fallback).
+2. Re-run ingestion with `recreate: true` (in-app ingest button or
+   `POST /ingest {"recreate": true}`) so the new definition-based vectors
+   replace the old index.
+3. Verify with a reverse query, e.g. «احساس بی‌قراری و اضطراب» — expect
+   anxiety-related headwords (اضطراب / نگرانی / وسواس …), each headword
+   appearing at most once.
