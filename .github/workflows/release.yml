@@ -339,12 +339,16 @@ jobs:
           dest.unlink()
           print("qdrant.exe ready:", out.stat().st_size, "bytes")
           PY
-      - name: Stage resources (lean content — no model yet)
+      - name: Stage resources + Tauri build (lean content — no model yet)
         shell: bash
         run: |
           mkdir -p desktop/src-tauri/resources/dehkhoda-server
           rm -rf desktop/src-tauri/resources/dehkhoda-server/*
           cp -r backend/dist/dehkhoda-server/. desktop/src-tauri/resources/dehkhoda-server/
+          # v1.2.1 built the GUI here; the v1.3.0 split dropped it and NSIS
+          # prelude died on Resolve-Path (no dehkhoda-rag.exe). Build once —
+          # the exe is variant-agnostic (NSIS packages resources from disk).
+          cd desktop && npm install --no-fund --no-audit && npx tauri build --no-bundle
       - name: "Build gate: engine smoke (qdrant default) on the packaged sidecar"
         shell: bash
         run: |
