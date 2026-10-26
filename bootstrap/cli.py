@@ -56,6 +56,10 @@ def step_report(args) -> None:
     em = Emitter("system")
     consent = args.consent if args.consent in (0, 1) else None
     rep = detector.build_report(consent=None if consent is None else bool(consent))
+    try:
+        rep["model"] = model_report()
+    except Exception as exc:  # never let the model section break detection
+        em.progress(log=f"model_report unavailable: {exc}")
     em.result(True, data=rep)
 
 
@@ -184,11 +188,64 @@ def step_db(args) -> None:
                   error_fa="راه‌اندازی موتور برداری ناموفق بود؛ با «تلاش مجدد» دوباره امتحان کنید یا موتور جایگزین را برگزینید.")
 
 
+FA_MODEL_ERR = {
+    "disk": "فضای دیسک برای دانلود مدل کافی نیست. چند گیگابایت آزاد کنید و «تلاش مجدد» را بزنید.",
+    "dns": "اتصال به سرور مدل (huggingface.co) برقرار نشد. اتصال اینترنت را بررسی کنید؛ نسخهٔ کامل (آفلاین) به اینترنت نیاز ندارد.",
+    "timeout": "اتصال به سرور مدل بیش از حد طول کشید. اتصال خود را بررسی کرده و «تلاش مجدد» را بزنید.",
+    "http": "سرور مدل پاسخ خطا داد. بعداً دوباره امتحان کنید یا از نسخهٔ کامل (آفلاین) استفاده کنید.",
+    "checksum": "فایل دانلودشده با اثر انگشت رسمی مطابقت ندارد و پاک شد. «تلاش مجدد» دانلود را از نو امن می‌کند.",
+    "download": "دانلود مدل ناتمام ماند. اتصال برقرار است؟ «تلاش مجدد» از همان‌جا ادامه می‌دهد.",
+}
+
+
+def _model_variant() -> str:
+    """full = the package ships the model; lean = first-run download."""
+    from . import paths
+
+    return "full" if paths.bundled_model_dir() else "lean"
+
+
+def model_report() -> dict:
+    """Model-variant summary for the system-report step (no side effects)."""
+    from . import model_download, paths
+
+    bundled = paths.bundled_model_dir()
+    try:
+        em = model_download.model_pin()
+        rev = em["revision"]
+        total = model_download.total_size_bytes()
+        repo_id = em.get("repo_id") or em["id"]
+    except Exception:  # pins unreadable must never break the report
+        rev, total, repo_id = "", 0, ""
+    return {
+        "variant": "full" if bundled else "lean",
+        "repo_id": repo_id,
+        "revision": rev,
+        "total_size_bytes": total,
+        "bundled_dir": str(bundled) if bundled else None,
+        "target_dir": str(model_download.target_dir()),
+        "ready": model_download.model_ready() is not None,
+        "partial": model_download.detect_partial(),
+    }
+
+
 def step_model(args) -> None:
-    from . import model_fetcher
+    """دانلود مدل زبانی — the v1.3.0 dual-variant step.
+
+    Modes (flags on --step model):
+      (none)      resolve-or-download: bundled → verify+mark; .ready → skip;
+                  seeded/downloaded dir → verify+mark; else download
+      --preflight report only (disk 2x + HEAD 5s + partial detection)
+      --start     begin/resume the download (lean)
+      --restart   discard .partial residue, then download from scratch
+      --check     verify an existing dir (bundled or data dir), no download
+      --skip      escape hatch: hash embedder (keyword-only search)
+    """
+    from . import model_download, paths
 
     em = Emitter("model")
-    pins = model_fetcher.load_pins()["embedding_model"]
+    variant = _model_variant()
+
     if args.skip:
         state.set_value("embedder", "hash")
         st = state.load()
@@ -196,23 +253,152 @@ def step_model(args) -> None:
         state.save(st)
         em.result(True, data={"skipped": True, "embedder": "hash"})
         return
-    if model_fetcher.model_complete(pins["revision"]):
-        em.progress(task_fa="مدل از قبل دانلود شده است")
-        state.set_value("embedder", "e5-base")
-        em.result(True, data={"dir": str(paths.models_dir()), "cached": True})
+
+    if args.preflight:
+        em.result(True, data={"variant": variant,
+                              "preflight": model_download.preflight()})
         return
-    try:
-        d = model_fetcher.fetch_model(
-            progress_cb=lambda done, total, msg: em.progress(
-                pct=int(100 * done / max(1, total)), task_fa="دانلود مدل زبانی…",
-                log=msg))
+
+    ready = model_download.model_ready()
+    if ready and not args.restart:
         state.set_value("embedder", "e5-base")
         state.mark_step("model")
-        em.result(True, data={"dir": str(d)})
+        em.result(True, data={"status": "ready", "cached": True,
+                              "source": ready.get("source"),
+                              "revision": ready.get("revision")})
+        return
+
+    bundled = paths.bundled_model_dir()
+    if variant == "full" and bundled:
+        em.progress(task_fa="بررسی نسخهٔ همراه مدل…", indet=True)
+        bad = model_download.verify_dir(bundled)
+        if bad:
+            # spec: log a warning; do NOT block startup on a bundled-dir
+            # checksum mismatch (the engine chain still works keyword-only)
+            em.progress(log="bundled model checksum mismatch: "
+                            + ", ".join(bad))
+        else:
+            em.progress(log=f"bundled model verified against pins.json: "
+                            f"{bundled}")
+        st = state.load()
+        st["model"] = {"source": "bundled", "dir": str(bundled),
+                       "revision": model_download.revision(),
+                       "verified": not bad}
+        state.save(st)
+        state.set_value("embedder", "e5-base")
+        state.mark_step("model")
+        if not bad:
+            model_download.mark_ready("bundled")
+        em.result(True, data={"status": "bundled", "dir": str(bundled),
+                              "verified": not bad,
+                              "revision": model_download.revision(),
+                              "message_fa": "مدل زبانی همراه بسته نصب شد."})
+        return
+
+    # ------- lean: an existing complete dir (seeded / earlier download)? --
+    tdir = model_download.target_dir()
+    if not args.restart and model_download.valid_dir(tdir) and \
+            not model_download.detect_partial():
+        bad = model_download.verify_dir(tdir, delete_bad=True)
+        if not bad:
+            model_download.ensure_model_ready("downloaded")
+            st = state.load()
+            st["model"] = {"source": "downloaded", "dir": str(tdir),
+                           "revision": model_download.revision(),
+                           "verified": True}
+            state.save(st)
+            state.set_value("embedder", "e5-base")
+            state.mark_step("model")
+            em.result(True, data={"status": "ready", "dir": str(tdir),
+                                  "source": "downloaded",
+                                  "revision": model_download.revision()})
+            return
+        em.progress(log="incomplete model dir removed: " + ", ".join(bad))
+
+    partial = model_download.detect_partial()
+
+    if args.check:
+        # verification-only mode (CI acceptance): never download; a partial
+        # download does NOT count as present
+        em.result(False, error_code="model_missing",
+                  error_fa=("مدل زبانی در دسترس نیست؛ نسخهٔ سبک آن را در اولین "
+                            "اجرا دانلود می‌کند."),
+                  data={"variant": variant, "target_dir": str(tdir),
+                        "partial": partial})
+        return
+
+    if partial and not (args.start or args.restart):
+        # let the wizard show «دانلود مدل ناقص است. ادامه می‌دهید؟» first
+        em.result(True, data={"status": "partial", "partial": partial,
+                              "preflight": model_download.preflight()})
+        return
+
+    if args.restart:
+        model_download.discard_partial()
+        partial = None
+
+    # ------------------------------ the actual (resumable) download -------
+    em.progress(task_fa="آماده‌سازی دانلود…", log=f"variant=lean revision="
+                f"{model_download.revision()} target={tdir}")
+
+    def cb(p: dict) -> None:
+        em.progress(
+            pct=int(p["overall_percent"]),
+            task_fa=f"در حال دانلود: {p['file']} — "
+                    f"{p['bytes_done'] // 1048576} از "
+                    f"{p['bytes_total'] // 1048576} مگابایت",
+            log=(f"{p['file']} {p['bytes_done']}/{p['bytes_total']} "
+                 f"speed={p['speed_bps']}B/s eta={p['eta_seconds']}s "
+                 f"phase={p['phase']}"),
+            data=p)
+
+    try:
+        pf = model_download.preflight()
+        if not pf["disk_ok"]:
+            raise model_download.ModelDownloadError(
+                f"need {pf['need_bytes']} bytes free, "
+                f"have {pf['disk_free_bytes']}", kind="disk")
+        if not pf["network_ok"]:
+            raise model_download.ModelDownloadError(
+                pf["network_error"], kind=_net_kind(pf["network_error"]))
+        d = model_download.download(progress_cb=cb)
+        model_download.ensure_model_ready("downloaded")
+        st = state.load()
+        st["model"] = {"source": "downloaded", "dir": str(d),
+                       "revision": model_download.revision(),
+                       "verified": True}
+        state.save(st)
+        state.set_value("embedder", "e5-base")
+        state.mark_step("model")
+        em.result(True, data={"status": "ready", "dir": str(d),
+                              "source": "downloaded",
+                              "revision": model_download.revision(),
+                              "message_fa": "مدل زبانی دانلود و تأیید شد."})
+    except model_download.DownloadCancelled:
+        partial = model_download.detect_partial() or {}
+        em.result(False, error_code="cancelled",
+                  error_fa="دانلود متوقف شد؛ فایل‌های ناقص برای ادامه حفظ شدند.",
+                  data={"partial": partial,
+                        "target_dir": str(model_download.target_dir())})
+    except model_download.ModelDownloadError as exc:
+        _log_exception(em, exc)
+        em.progress(log=exc.technical())
+        em.result(False, error_code=f"model_download_{exc.kind}",
+                  error_fa=FA_MODEL_ERR.get(exc.kind, FA_MODEL_ERR["download"]),
+                  data={"technical": exc.technical(), "url": exc.url,
+                        "http_status": exc.http_status, "kind": exc.kind,
+                        "resume_bytes": (partial or {}).get("bytes", 0)})
     except Exception as exc:
         _log_exception(em, exc)
         em.result(False, error_code="model_download_failed",
-                  error_fa="دانلود مدل ناموفق بود؛ اتصال اینترنت را بررسی کرده و «تلاش مجدد» را بزنید.")
+                  error_fa="دانلود مدل ناموفق بود؛ «تلاش مجدد» از همان‌جا ادامه می‌دهد.")
+
+
+def _net_kind(net_err: str) -> str:
+    for kind in ("dns", "timeout", "http"):
+        if f"kind={kind}" in net_err:
+            return kind
+    return "download"
 
 
 def step_ingest(args) -> None:
@@ -298,9 +484,20 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--consent", type=int, default=None, choices=(0, 1))
     ap.add_argument("--skip", action="store_true")
     ap.add_argument("--recreate", action="store_true")
+    # v1.3.0 model-step modes (--step model)
+    ap.add_argument("--preflight", action="store_true",
+                    help="model: report-only pre-flight (disk 2x + HEAD 5s)")
+    ap.add_argument("--start", action="store_true",
+                    help="model: begin/resume the download")
+    ap.add_argument("--restart", action="store_true",
+                    help="model: discard .partial residue, start over")
+    ap.add_argument("--check", action="store_true",
+                    help="model: verify an existing dir, never download")
     ap.add_argument("--engine", default=None,
-                    choices=("qdrant_local", "qdrant_native", "milvus_lite", "milvus"),
-                    help="engine-smoke: force a single engine probe")
+                    choices=("qdrant_local", "qdrant_native", "milvus_lite",
+                             "milvus", "dense"),
+                    help="engine-smoke: force a single engine probe "
+                         "(dense = real e5 model probe)")
     ap.add_argument("--preferred", default=None,
                     help="engine-smoke: start the chain at this engine")
     ap.add_argument("--set", dest="set", default=None)

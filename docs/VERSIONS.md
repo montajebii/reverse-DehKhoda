@@ -44,6 +44,18 @@ paths. Pairs with `docker-compose.yml`, `backend/requirements*.txt`,
 | Rows verified | **312,507** (ids 1…312507, contiguous) |
 | Dump format | phpMyAdmin 4.7.7 / MariaDB 10.1.30, `utf8mb4_persian_ci`, table `words(id, word, meaning)` |
 
+## v1.3.0 — release variants (full / lean) + pinned model downloader
+
+No engine/UI/dataset changes (scope: packaging + model-download UX only).
+
+| Change | Detail |
+|---|---|
+| Build flag | `DEHKHODA_BUNDLE_MODEL=1` → model tarball staged into the sidecar bundle at `_internal/models/<revision>/` (full variant); unset → lean variant, model downloaded on first run |
+| Lean downloader | `bootstrap/model_download.py` — stdlib-only, HTTP Range resume on `<file>.partial`, per-file sha256 vs pins.json (delete → retry once → Persian error), cooperative cancel (Tauri `bootstrap_cancel`), `.ready` fast path (<100 ms) |
+| Wizard model step | pre-flight (exact size, disk ≥ 2× model, HEAD probe 5 s) → «شروع دانلود» → progress bar with file + speed + ETA → resume prompt «دانلود مدل ناقص است. ادامه می‌دهید؟» |
+| Model tarball | CI `model-cache` job — one verified download per `pins.json` hash; tarball layout `models/<revision>/…` doubles as lean-acceptance seed |
+| Release artifacts | `Dehkhoda.RAG_<v>_amd64-{full,lean}.AppImage`, `dehkhoda-setup-win-<v>-{full,lean}.exe`, one offline `.deb`, `SHA256SUMS.all` |
+
 ## Deliberate non-pins
 
 * PyInstaller — installed at build time only (build machines), `>=6.22`; not
@@ -72,7 +84,7 @@ No dependency changes; all pins above remain.  Behavioural changes:
 |---|---|---|
 | docker compose standalone (Linux fallback rung) | v5.6.1 | sha256 x86_64 + aarch64 |
 | Qdrant sidecar (Windows + Linux no-Docker fallback) | v1.20.0 | sha256 (gnu/musl/windows) |
-| multilingual-e5-base weights | HF revision `d1287505` | sha256 per LFS file (model.safetensors, tokenizer.json, sentencepiece.bpe.model) |
+| multilingual-e5-base weights | HF revision `d128750597153bb5987e10b1c3493a34e5a4502a` | **sha256 for ALL 9 files** (v1.3.0: small text files hashed too — verified against the HF tree API + full downloads) |
 | Dehkhoda SQL dumps | repo commit `185ed68b` (immutable) | per-file size + 312,506-row integrity check |
 
 Notes:

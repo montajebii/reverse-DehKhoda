@@ -51,6 +51,19 @@ function setStatus(kind, text) {
   $statusDot.className = "dot " + (kind === "on" ? "dot-on" : kind === "err" ? "dot-err" : "dot-off");
   $statusText.textContent = text;
 }
+/* error cards: Persian summary + exact technical reason (collapsible) */
+function errorCard(title, faMsg, technical) {
+  const c = el("div", "wcard error-card");
+  c.appendChild(el("h3", null, title));
+  c.appendChild(el("p", null, faMsg || ""));
+  if (technical) {
+    const det = el("details", "hit-details");
+    det.appendChild(el("summary", null, "جزئیات فنی خطا"));
+    det.appendChild(el("div", "hit-full", esc(String(technical))));
+    c.appendChild(det);
+  }
+  return c;
+}
 function markStep(n, status) {
   const node = document.querySelector(`.step[data-step="${n}"]`);
   if (!node) return;
@@ -97,8 +110,24 @@ const REASON_FA = {
   no_qdrant_windows_arm64: "برای ویندوز ARM64 موتور جایگزینی موجود نیست",
 };
 
+/* ---------------- Persian quantity helpers ---------------- */
+function faMB(bytes) { return faNum(Math.round(bytes / 1e6)); }
+function faMB1(bytes) { return faNum(Math.round(bytes / 1e5) / 10); }
+function faSpeed(bps) {
+  if (!bps || bps < 1) return "—";
+  if (bps >= 1048576) return faNum(Math.round(bps / 104857) / 10) + " مگابایت/ثانیه";
+  return faNum(Math.round(bps / 1024)) + " کیلوبایت/ثانیه";
+}
+function faEta(sec) {
+  if (!sec || sec < 1 || !isFinite(sec)) return "—";
+  const m = Math.floor(sec / 60), s = Math.round(sec % 60);
+  if (m <= 0) return faNum(s) + " ثانیه";
+  if (m < 60) return faNum(m) + " دقیقه" + (s ? " و " + faNum(s) + " ثانیه" : "");
+  return faNum(Math.floor(m / 60)) + " ساعت و " + faNum(m % 60) + " دقیقه";
+}
+
 /* ---------------- wizard-event plumbing ---------------- */
-let liveProgress = null; // {fill, task, pct}
+let liveProgress = null; // {fill, task, pct, dlLine}
 
 B.onWizardEvent((obj) => {
   if (!obj) return;
@@ -112,6 +141,15 @@ B.onWizardEvent((obj) => {
         liveProgress.fill.style.width = obj.pct + "%";
         liveProgress.pct.textContent = faNum(obj.pct) + "٪";
       }
+      // structured download progress (model_download v1.3):
+      // {file, bytes_done, bytes_total, speed_bps, eta_seconds, overall_percent}
+      if (obj.dl && liveProgress.dlLine) {
+        liveProgress.dlLine.hidden = false;
+        const d = obj.dl;
+        liveProgress.dlLine.textContent =
+          (d.phase === "verified" ? "تأیید شد: " : "در حال دانلود: ") +
+          d.file + " — " + faSpeed(d.speed_bps) + " — مانده " + faEta(d.eta_seconds);
+      }
     }
   }
 });
@@ -123,12 +161,14 @@ async function runStep(stepName, args, panel) {
     const track = el("div", "progress-track");
     const fill = el("div", "progress-fill");
     track.appendChild(fill);
+    const dlLine = el("div", "dl-line");
+    dlLine.hidden = true;
     const taskLine = el("div", "task-line");
     const task = el("span", null, "در حال اجرا…");
     const pct = el("span", "pct", "");
     taskLine.append(task, pct);
-    panel.prepend(taskLine, track);
-    liveProgress = { fill, task, pct };
+    panel.prepend(dlLine, taskLine, track);
+    liveProgress = { fill, task, pct, dlLine };
   }
   try {
     const res = await B.runStep(stepName, args);
@@ -163,9 +203,10 @@ function renderWelcome() {
   const c2 = el("div", "wcard");
   c2.innerHTML = `
     <h3>چه چیزی نصب یا دریافت می‌شود؟</h3>
-    <p>موتور جست‌وجوی برداری (در صورت نیاز با پنجرهٔ رمز سیستم‌عامل)،
+    <p>موتور جست‌وجوی برداری (در صورت نیاز با پنجرهٔ رمز سیستم‌عامل) و
     مدل زبانی حدود ۱٫۱ گیگابایت و داده‌های لغت‌نامه حدود ۲۹۰ مگابایت —
-    همه در پوشهٔ کاربری شما.</p>`;
+    همه در پوشهٔ کاربری شما. در «نسخهٔ کامل» مدل زبانی همراه بسته است و
+    اینترنت لازم ندارد؛ در «نسخهٔ سبک» فقط در اولین اجرا دانلود می‌شود.</p>`;
   $panelBody.append(c, c2);
   $panelActions.append(
     button("ادامه", "btn-primary", () => {
@@ -482,45 +523,218 @@ async function renderDatabase() {
 }
 
 /* =========================================================================
-   STEP 5 — دانلود مدل زبانی
+   STEP 5 — مدل زبانی (v1.3.0: دو نسخهٔ full/lean)
+   full: «مدل زبانی همراه بسته نصب شد.» — verify once, warn-only, no download
+   lean: pre-flight (disk 2x + HEAD 5s) → resume prompt → progress bar with
+         file + speed + ETA + Cancel → sha256 verify → «آماده»
    ========================================================================= */
+function modelVariant() {
+  return (S.report && S.report.model && S.report.model.variant) || "lean";
+}
+const MODEL_RELEASE_URL = "https://github.com/montajebii/reverse-DehKhoda/releases/latest";
+
 async function renderModel() {
   S.currentStep = "model";
   markStep(5, S.state.steps.model === "done" ? "done" : "active");
-  setHead("دانلود مدل زبانی",
-    "مدل چندزبانهٔ e5-base (۱٫۱ گیگابایت) برای جست‌وجوی معنایی؛ فقط یک‌بار دانلود می‌شود.");
+  if (modelVariant() === "full") return renderModelFull();
+  return renderModelLean();
+}
+
+/* ---------- full variant: bundled weights, no download UI ---------- */
+async function renderModelFull() {
+  setStatus("off", "در حال بررسی مدل همراه…");
+  setHead("مدل زبانی",
+    "نسخهٔ کامل: مدل زبانی داخل همین بسته نصب شده و به اینترنت نیازی نیست.");
   clearPanel();
 
+  const m = (S.report && S.report.model) || {};
+  if (m.ready) {
+    // .ready fast path — nothing to hash, nothing to show but the line
+    modelDoneFull(true, true);
+    return;
+  }
   const c = el("div", "wcard");
-  c.appendChild(el("h3", null, "چرا مدل زبانی؟"));
-  c.appendChild(el("p", null,
-    "این مدل «معنای» توصیف شما را با تعاریف دهخدا مقایسه می‌کند. بدون آن، جست‌وجو فقط کلیدواژه‌ای خواهد بود."));
   $panelBody.appendChild(c);
+  const res = await runStep("model", [], c);
+  if (!res.ok) {
+    clearPanel();
+    $panelBody.appendChild(errorCard("بررسی مدل همراه ناموفق بود",
+      res.error_fa || "خطای نامشخص", (res.data && res.data.technical) || ""));
+    $panelActions.append(
+      button("تلاش مجدد", "btn-primary", renderModelFull),
+      button("بازگشت به گام قبل", "btn-ghost", renderDatabase));
+    setStatus("err", "بررسی مدل ناموفق");
+    return;
+  }
+  modelDoneFull(res.data && res.data.verified !== false, true);
+}
 
+function modelDoneFull(verified, advance) {
+  clearPanel();
+  const c = el("div", "wcard");
+  c.appendChild(el("h3", null, "مدل زبانی همراه بسته نصب شد."));
+  c.appendChild(el("p", null, verified
+    ? "اثر انگشت همهٔ فایل‌های مدل با pins.json تأیید شد؛ جست‌وجوی معنایی آفلاین کار می‌کند."
+    : "هشدار: اثر انگشت برخی فایل‌های مدل مطابقت ندارد (جزئیات در «جزئیات فنی»). ادامه می‌دهیم، اما توصیه می‌کنیم بسته را دوباره دریافت کنید."));
+  $panelBody.appendChild(c);
+  markStep(5, "done");
+  setStatus("on", verified ? "مدل همراه تأیید شد" : "مدل همراه (هشدار تطابق)");
+  if (advance) renderDictionary();
+}
+
+/* ---------- lean variant: pre-flight → download/resume ---------- */
+async function renderModelLean() {
+  setHead("مدل زبانی",
+    "مدل چندزبانهٔ e5-base برای جست‌وجوی معنایی؛ فقط یک‌بار دانلود می‌شود و بعد از آن همه‌چیز آفلاین است.");
+  clearPanel();
+  setStatus("off", "در حال بررسی امکان دانلود…");
+
+  const res = await runStep("model", ["--preflight"], null);
+  if (!res.ok) {
+    leanErrorCard(res.error_fa || "بررسی پیش‌نیازهای دانلود ناموفق بود", res);
+    return;
+  }
+  const pf = (res.data && res.data.preflight) || {};
+  S.modelPreflight = pf;
+
+  if (pf.already_ready) { leanReadyCard(null, "مدل از قبل آماده است."); return; }
+
+  if (!pf.network_ok) {
+    const c = errorCard("به اینترنت نیاز است",
+      "برای دانلود مدل در اولین اجرا، اتصال به huggingface.co لازم است. " +
+      "اگر اینترنت ندارید، نسخهٔ کامل (آفلاین) را از صفحهٔ انتشار دریافت کنید.",
+      pf.network_error);
+    const urlRow = el("div", "model-url");
+    urlRow.textContent = MODEL_RELEASE_URL;
+    c.appendChild(urlRow);
+    $panelBody.appendChild(c);
+    $panelActions.append(
+      button("تلاش مجدد", "btn-primary", renderModelLean),
+      button("راهنمای نسخهٔ آفلاین", "btn-ghost",
+        () => { try { window.open(MODEL_RELEASE_URL, "_blank"); } catch (e) { /* show URL text */ } }),
+      button("رد کردن (جست‌وجوی کلیدواژه‌ای)", "btn-ghost", () => doModelRun(true)));
+    setStatus("err", "شبکه در دسترس نیست");
+    return;
+  }
+  if (!pf.disk_ok) {
+    const c = errorCard("فضای دیسک کافی نیست",
+      `برای دانلود امن مدل به ${faMB(pf.need_bytes)} مگابایت فضای خالی نیاز است ` +
+      `(حجم مدل ${faMB(pf.total_size_bytes)} مگابایت + فضای تأیید). ` +
+      `الان ${faMB(pf.disk_free_bytes)} مگابایت خالی دارید.`,
+      `need_bytes=${pf.need_bytes} free=${pf.disk_free_bytes} factor=2x`);
+    $panelBody.appendChild(c);
+    $panelActions.append(
+      button("تلاش مجدد", "btn-primary", renderModelLean),
+      button("بازگشت به گام قبل", "btn-ghost", renderDatabase));
+    setStatus("err", "فضای دیسک ناکافی");
+    return;
+  }
+
+  if (pf.partial && pf.partial.bytes > 0) {
+    leanResumeCard(pf);
+    return;
+  }
+
+  leanStartCard(pf);
+}
+
+function leanStartCard(pf) {
+  clearPanel();
+  const c = el("div", "wcard");
+  c.appendChild(el("h3", null, "آمادهٔ دانلود مدل زبانی"));
+  const meta = el("ul", "model-meta");
+  meta.innerHTML = `
+    <li>حجم دقیق دانلود: <b>${faMB(pf.total_size_bytes)} مگابایت</b> (${faNum(pf.files.length)} فایل)</li>
+    <li>محل ذخیره: <span dir="ltr" class="mono">${esc(pf.target_dir)}</span></li>
+    <li>پس از دانلود، اثر انگشت همهٔ فایل‌ها با pins.json تأیید می‌شود و نیازی به اینترنت نخواهید داشت.</li>`;
+  c.appendChild(meta);
+  $panelBody.appendChild(c);
   $panelActions.append(
-    button("ادامه (دانلود)", "btn-primary", () => doModelRun(false)),
+    button("شروع دانلود", "btn-primary", () => doModelDownload([])),
     button("رد کردن (در صورت امکان)", "btn-ghost", () => doModelRun(true)),
-    button("انصراف", "btn-ghost", cancelWizard)
-  );
+    button("انصراف", "btn-ghost", cancelWizard));
   setStatus("off", "در انتظار شروع دانلود");
 }
 
+function leanResumeCard(pf) {
+  clearPanel();
+  const c = el("div", "wcard decision");
+  c.appendChild(el("h3", null, "دانلود مدل ناقص است. ادامه می‌دهید؟"));
+  const meta = el("ul", "model-meta");
+  meta.innerHTML = `
+    <li>از دانلود قبلی <b>${faMB1(pf.partial.bytes)} مگابایت</b> باقی مانده است و دوباره دریافت نمی‌شود.</li>
+    <li>حجم کل مدل: ${faMB(pf.total_size_bytes)} مگابایت.</li>`;
+  c.appendChild(meta);
+  $panelBody.appendChild(c);
+  $panelActions.append(
+    button("ادامهٔ دانلود", "btn-primary", () => doModelDownload(["--start"])),
+    button("از ابتدا", "btn-ghost", () => doModelDownload(["--restart"])),
+    button("انصراف", "btn-ghost", cancelWizard));
+  setStatus("off", "دانلود ناقص — در انتظار تصمیم شما");
+}
+
+async function doModelDownload(extraArgs) {
+  clearPanel();
+  const c = el("div", "wcard");
+  c.appendChild(el("p", null, "دانلود قابل لغو است؛ اگر لغو یا برنامه بسته شود، از همان‌جا ادامه می‌دهیم."));
+  $panelBody.appendChild(c);
+  $panelActions.append(
+    button("لغو دانلود", "btn-ghost", async () => {
+      setStatus("off", "در حال لغو…");
+      await B.cancelStep();
+    }));
+  setStatus("off", "در حال دانلود مدل…");
+
+  const res = await runStep("model", ["--start", ...extraArgs], c);
+  $panelActions.replaceChildren();
+  if (!res.ok) {
+    if (res.error_code === "cancelled") {
+      leanResumeCard(res.data && res.data.partial
+        ? { partial: res.data.partial,
+            total_size_bytes: (S.modelPreflight || {}).total_size_bytes || 0 }
+        : S.modelPreflight || { partial: { bytes: 0, files: {} } });
+      setStatus("off", "دانلود لغو شد");
+      return;
+    }
+    leanErrorCard(res.error_fa || "دانلود مدل ناموفق بود", res);
+    return;
+  }
+  leanReadyCard(res.data, null);
+}
+
+function leanReadyCard(data, note) {
+  clearPanel();
+  const c = el("div", "wcard");
+  c.appendChild(el("h3", null, "مدل زبانی آماده است"));
+  c.appendChild(el("p", null, note || "اثر انگشت همهٔ فایل‌ها با pins.json تأیید شد؛ از این پس دانلودی انجام نمی‌شود."));
+  $panelBody.appendChild(c);
+  markStep(5, "done");
+  setStatus("on", "مدل آماده است");
+  renderDictionary();
+}
+
+function leanErrorCard(faMsg, res) {
+  clearPanel();
+  const technical = res && res.data
+    ? [res.data.technical, res.data.url ? "url=" + res.data.url : "",
+       res.data.http_status ? "http_status=" + res.data.http_status : ""]
+        .filter(Boolean).join(" | ")
+    : (res && res.error_fa) || "";
+  $panelBody.appendChild(errorCard("دانلود مدل ناموفق بود", faMsg, technical));
+  $panelActions.append(
+    button("تلاش مجدد", "btn-primary", () => doModelDownload(["--start"])),
+    button("بازگشت به گام قبل", "btn-ghost", renderDatabase));
+  setStatus("err", "دانلود ناموفق");
+}
+
+/* legacy direct runner (skip escape hatch; kept for repair flows) */
 async function doModelRun(skip) {
   clearPanel();
   const c = el("div", "wcard");
   $panelBody.appendChild(c);
   const res = await runStep("model", skip ? ["--skip"] : [], c);
   if (!res.ok) {
-    clearPanel();
-    const err = el("div", "wcard error-card");
-    err.appendChild(el("h3", null, "دانلود مدل ناموفق بود"));
-    err.appendChild(el("p", null, esc(res.error_fa || "")));
-    $panelBody.appendChild(err);
-    $panelActions.append(
-      button("تلاش مجدد", "btn-primary", () => doModelRun(skip)),
-      button("رد کردن و ادامه", "btn-ghost", () => doModelRun(true))
-    );
-    setStatus("err", "دانلود ناموفق");
+    leanErrorCard(res.error_fa || "دانلود مدل ناموفق بود", res);
     return;
   }
   if (res.data && res.data.skipped) {

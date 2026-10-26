@@ -62,5 +62,59 @@ def apply_env() -> dict:
     if st.get("embedder") == "hash":
         os.environ["DEHKHODA_EMBEDDER"] = "hash"
         os.environ["DEHKHODA_DENSE_DIM"] = "256"
-    os.environ.setdefault("DEHKHODA_MODEL_DIR", str(paths.models_dir()))
+    os.environ.setdefault("DEHKHODA_MODEL_DIR", str(resolve_model_dir(st)))
     return st
+
+
+def _valid_model_dir(p) -> bool:
+    return bool(p) and (p / "config.json").exists() and \
+        (p / "model.safetensors").exists()
+
+
+def resolve_model_dir(st: dict) -> Path:
+    """Pick the directory the dense embedder loads weights from.
+
+    Priority (v1.3.0):
+      1. the wizard's recorded choice   st["model"]["dir"]  (verified at
+         wizard time; re-validated for existence here)
+      2. a downloaded model in the data dir  models/<revision>/ carrying a
+         .complete-<revision> marker (lean variant / acceptance seed)
+      3. the model bundled inside the package               (full variant)
+      4. the legacy canonical dir models/multilingual-e5-base (v1.2.1)
+      5. the default models dir (empty — backend then falls back to the
+         hub id, as in v1.2.x)
+    """
+    from . import paths
+
+    m = st.get("model") or {}
+    cand = m.get("dir")
+    if cand:
+        p = Path(cand)
+        if _valid_model_dir(p):
+            return p
+
+    root = paths.models_root()
+    ready = paths.read_ready()
+    candidates: list[Path] = []
+    if ready.get("revision"):
+        candidates.append(root / str(ready["revision"]))
+    # any revision dir with a .complete-<rev> marker (newest first)
+    try:
+        for d in sorted(root.iterdir(), key=lambda x: x.stat().st_mtime,
+                        reverse=True):
+            if d.is_dir() and d.name != paths.MODEL_DIRNAME and \
+                    any(d.glob(".complete-*")):
+                candidates.append(d)
+    except OSError:
+        pass
+    for c in candidates:
+        if _valid_model_dir(c):
+            return c
+
+    bundled = paths.bundled_model_dir()
+    if bundled:
+        return bundled
+
+    if _valid_model_dir(paths.models_dir()):
+        return paths.models_dir()
+    return paths.models_dir()

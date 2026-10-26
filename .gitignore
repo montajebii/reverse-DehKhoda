@@ -37,3 +37,4 @@ devtools/
 dist-linux/
 dist-win/
 .qdrant-initialized
+tool-results/

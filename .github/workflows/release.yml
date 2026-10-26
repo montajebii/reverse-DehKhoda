@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 env:
-  VERSION: "1.2.1"
+  VERSION: "1.3.0"
 
 jobs:
   # ================================================== Linux container tests
@@ -82,15 +82,53 @@ jobs:
       - name: "Decision table: Windows + docker declined -> qdrant_native; Linux default -> qdrant"
         run: python bootstrap/tests/test_decision_table.py
 
+  # ================================================== Pinned model cache
+  # ONE download of the pinned e5 revision per pins.json change; the tarball
+  # is sha256-verified file-by-file BEFORE being cached/uploaded, so neither
+  # the full build nor the lean acceptance seed ever trusts unverified bytes
+  # and CI never depends on live HuggingFace beyond this job.
+  model-cache:
+    name: pinned model tarball (verify + cache)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        id: tar-cache
+        with:
+          path: model-e5.tar.gz
+          key: model-e5-${{ hashFiles('bootstrap/pins.json') }}
+      - name: Download + sha256-verify + pack (on cache miss)
+        if: steps.tar-cache.outputs.cache-hit != 'true'
+        run: |
+          python3 scripts/fetch_pinned_model.py --dest model-e5 --tar model-e5.tar.gz
+      - name: Verify tarball bytes against pins.json (ALWAYS, cache or not)
+        run: |
+          rm -rf /tmp/verify-model && mkdir -p /tmp/verify-model
+          tar -xzf model-e5.tar.gz -C /tmp/verify-model
+          REV=$(python3 -c "import json;print(json.load(open('bootstrap/pins.json'))['embedding_model']['revision'])")
+          python3 scripts/fetch_pinned_model.py --from-dir "/tmp/verify-model/models/$REV"
+          echo "revision: $REV"
+          du -sh model-e5.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: model-tarball
+          path: model-e5.tar.gz
+          retention-days: 14
+
   # ================================================== Linux packages
   # Built INSIDE a debian:12 container so the bundled binaries link against
   # glibc 2.36 — the oldest of our supported targets (Debian 12, Ubuntu
   # 22.04+, Arch, Fedora). Binaries built on newer glibc would refuse to run
   # on Debian 12 ("GLIBC_2.38 not found") — one of the root causes of the
   # v1.2.0 "engine is not available" reports.
+  #
+  # v1.3.0: TWO release variants from the same codebase —
+  #   full: model tarball staged into _internal/models (offline-complete)
+  #   lean: no model inside (wizard downloads on first run)
   build-linux:
     name: packages (linux, debian-12 container)
     runs-on: ubuntu-latest
+    needs: [model-cache]
     container:
       image: python:3.12-slim-bookworm
     steps:
@@ -116,15 +154,21 @@ jobs:
             | sh -s -- -y --default-toolchain stable --profile minimal
           echo "/root/.cargo/bin" >> "$GITHUB_PATH"
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: model-tarball
+          path: .
       - name: Install Python deps (PyInstaller + backend)
         run: |
           python -m pip install --upgrade pip
           python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
           python -m pip install -r backend/requirements.txt pyinstaller
-      - name: Backend + AppImage + deb (+ bundled qdrant sidecar)
+      - name: Backend + full/lean AppImages + deb (+ bundled qdrant sidecar)
         run: bash installer/linux/appimage.sh
         env:
           DEHKHODA_BUNDLE_PROFILE: full
+          DEHKHODA_VARIANTS: "full lean"
+          DEHKHODA_MODEL_TARBALL: "$PWD/model-e5.tar.gz"
           # no /dev/fuse anywhere on CI — extract-and-run sidesteps FUSE for
           # the AppImage-based bundler tools (linuxdeploy, appimagetool)
           APPIMAGE_EXTRACT_AND_RUN: "1"
@@ -156,39 +200,51 @@ jobs:
           DEHKHODA_DATA_DIR=/tmp/dh-ci "$BIN" bootstrap --step report | tail -1 | grep -q '"ok": *true'
       - uses: actions/upload-artifact@v4
         with:
-          name: dehkhoda-linux
+          name: dehkhoda-linux-full
           path: |
-            dist-linux/*.AppImage
+            dist-linux/*-full.AppImage
             dist-linux/*.deb
             dist-linux/SHA256SUMS
             dist-linux/qdrant-sha256.txt
           retention-days: 14
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dehkhoda-linux-lean
+          path: dist-linux/*-lean.AppImage
+          retention-days: 14
 
   # ================================================== Linux acceptance tests
-  # Runs the PACKAGED AppImage inside clean distro containers (requirement 5):
-  # extracts it, boots the bundled backend engine, and asserts that the
-  # engine reports ready AND a real hybrid (dense+sparse+RRF) search returns
-  # hits — no external package installation inside the test containers.
+  # Runs the PACKAGED AppImage inside clean distro containers for BOTH
+  # variants (4 distros x full/lean = 8 jobs). Each container is started with
+  # `--network none` AFTER its image was pulled — every assertion therefore
+  # holds with ZERO network access:
+  #   full: engine chain + bundled qdrant + BUNDLED model verify + real e5
+  #         dense hybrid probe (the "no network requests for the model" test)
+  #   lean: model pre-seeded into the data dir from the CI tarball, then the
+  #         same engine + model assertions — proving a seeded lean install is
+  #         accepted offline and CI never touches live HuggingFace here.
   linux-acceptance:
-    name: appimage-acceptance (${{ matrix.image }})
-    needs: [build-linux]
+    name: appimage-acceptance (${{ matrix.variant }}, ${{ matrix.image }})
+    needs: [build-linux, model-cache]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - image: ubuntu:24.04
-          - image: debian:12
-          - image: fedora:latest
-          - image: archlinux:base-devel
+        image: [ubuntu:24.04, debian:12, fedora:latest, archlinux:base-devel]
+        variant: [full, lean]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: dehkhoda-linux
+          name: dehkhoda-linux-${{ matrix.variant }}
           path: dist-linux
-      - name: Arch package (.pkg.tar.zst)
-        if: matrix.image == 'archlinux:base-devel'
+      - uses: actions/download-artifact@v4
+        if: matrix.variant == 'lean'
+        with:
+          name: model-tarball
+          path: .
+      - name: Arch package (.pkg.tar.zst) — full variant only
+        if: matrix.image == 'archlinux:base-devel' && matrix.variant == 'full'
         run: |
           docker run --rm -v "$PWD":/repo -w /repo archlinux:base-devel bash -c '
             set -e
@@ -198,12 +254,25 @@ jobs:
             # ar fails with "No such file: dist-linux/Dehkhoda".
             bash installer/linux/arch.sh "$(ls -t dist-linux/*.deb | head -1)"
           '
-      - name: "Acceptance: extract AppImage, boot engine, hybrid search (${{ matrix.image }})"
+      - name: Pull image (network ON — the acceptance run itself is offline)
+        run: docker pull ${{ matrix.image }}
+      - name: "Acceptance (network NONE): ${{ matrix.variant }} on ${{ matrix.image }}"
         run: |
-          docker run --rm -v "$PWD":/repo -w /repo ${{ matrix.image }} \
-            bash /repo/bootstrap/tests/appimage_acceptance.sh /repo
+          if [ "${{ matrix.variant }}" = "lean" ]; then
+            # seed args: the tarball mounts read-only at /model-e5.tar.gz and
+            # appimage_acceptance.sh extracts it into DEHKHODA_DATA_DIR.
+            docker run --rm --network none \
+              -v "$PWD":/repo -v "$PWD/model-e5.tar.gz":/model-e5.tar.gz:ro \
+              -e DEHKHODA_MODEL_TARBALL=/model-e5.tar.gz \
+              ${{ matrix.image }} \
+              bash /repo/bootstrap/tests/appimage_acceptance.sh /repo
+          else
+            docker run --rm --network none -v "$PWD":/repo \
+              ${{ matrix.image }} \
+              bash /repo/bootstrap/tests/appimage_acceptance.sh /repo
+          fi
       - name: SHA256 checksums (incl. arch package)
-        if: matrix.image == 'archlinux:base-devel'
+        if: matrix.image == 'archlinux:base-devel' && matrix.variant == 'full'
         run: |
           cd dist-linux
           sha256sum ./*.AppImage ./*.deb ./*.pkg.tar.zst > SHA256SUMS
@@ -211,7 +280,7 @@ jobs:
       # Separate artifact: upload-artifact v4 overwrite=true REPLACES the
       # whole artifact (it would destroy the AppImage + deb from build-linux).
       - uses: actions/upload-artifact@v4
-        if: matrix.image == 'archlinux:base-devel'
+        if: matrix.image == 'archlinux:base-devel' && matrix.variant == 'full'
         with:
           name: dehkhoda-linux-arch
           path: |
@@ -220,9 +289,13 @@ jobs:
           retention-days: 14
 
   # ================================================== Windows installer
+  # v1.3.0: ONE PyInstaller build, TWO NSIS passes —
+  #   lean: resources staged WITHOUT the model  -> -DSUFFIX=-lean
+  #   full: model tarball extracted into _internal\models -> -DSUFFIX=-full
   build-windows:
-    name: installer (windows)
+    name: installer (windows, full + lean)
     runs-on: windows-latest
+    needs: [model-cache]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -232,6 +305,10 @@ jobs:
         with:
           node-version: "20"
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@v4
+        with:
+          name: model-tarball
+          path: .
       - name: Build sidecar (full profile)
         shell: bash
         run: |
@@ -262,20 +339,19 @@ jobs:
           dest.unlink()
           print("qdrant.exe ready:", out.stat().st_size, "bytes")
           PY
-      - name: Bundle resources + Tauri build (no bundler)
+      - name: Stage resources (lean content — no model yet)
         shell: bash
         run: |
           mkdir -p desktop/src-tauri/resources/dehkhoda-server
           rm -rf desktop/src-tauri/resources/dehkhoda-server/*
           cp -r backend/dist/dehkhoda-server/. desktop/src-tauri/resources/dehkhoda-server/
-          cd desktop && npm install --no-fund --no-audit && npx tauri build --no-bundle
       - name: "Build gate: engine smoke (qdrant default) on the packaged sidecar"
         shell: bash
         run: |
           BIN=backend/dist/dehkhoda-server/dehkhoda-server.exe
           export DEHKHODA_DATA_DIR="$PWD/.dh-ci"
           "$BIN" bootstrap --step engine-smoke 2>/dev/null | tail -1 | grep -q '"ok": *true'
-      - name: Compile NSIS installer
+      - name: Compile NSIS installer (LEAN)
         shell: pwsh
         run: |
           choco install nsis -y --no-progress
@@ -287,11 +363,38 @@ jobs:
             -DAPP_EXE="$exe" `
             -DBACKEND_DIR="$PWD/desktop/src-tauri/resources/dehkhoda-server" `
             -DQDRANT_DIR="$PWD/desktop/src-tauri/resources/sidecars/qdrant" `
-            -DVERSION="${{ env.VERSION }}" installer/windows/nsis.nsi
-          # NSIS resolves OutFile relative to the script's directory, so the
-          # installer lands at installer\windows\dehkhoda-setup-win-<v>.exe.
-          # The Sign + SHA256 steps below reference it there.
-      - name: Sign installer (if certificate secret present)
+            -DVERSION="${{ env.VERSION }}" -DSUFFIX="-lean" `
+            installer/windows/nsis.nsi
+      - name: Stage model into _internal (FULL content)
+        shell: bash
+        run: |
+          REV=$(python -c "import json;print(json.load(open('bootstrap/pins.json'))['embedding_model']['revision'])")
+          mkdir -p desktop/src-tauri/resources/dehkhoda-server/_internal
+          tar -xzf model-e5.tar.gz -C desktop/src-tauri/resources/dehkhoda-server/_internal
+          test -f "desktop/src-tauri/resources/dehkhoda-server/_internal/models/$REV/model.safetensors"
+          echo "staged bundled model (revision $REV)"
+          # also stage into backend/dist so the build gates below exercise the
+          # exact bytes that ship inside the full installer
+          mkdir -p backend/dist/dehkhoda-server/_internal
+          tar -xzf model-e5.tar.gz -C backend/dist/dehkhoda-server/_internal
+      - name: "Build gate: bundled model verify + real e5 dense probe (full bytes)"
+        shell: bash
+        run: |
+          BIN=backend/dist/dehkhoda-server/dehkhoda-server.exe
+          export DEHKHODA_DATA_DIR="$PWD/.dh-ci"
+          "$BIN" bootstrap --step model --check 2>/dev/null | tail -1 | grep -q '"ok": *true'
+          "$BIN" bootstrap --step engine-smoke --engine dense 2>/dev/null | tail -1 | grep -q '"ok": *true'
+      - name: Compile NSIS installer (FULL)
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path "desktop/src-tauri/target/release/dehkhoda-rag.exe").Path
+          & "C:\Program Files (x86)\NSIS\makensis.exe" `
+            -DAPP_EXE="$exe" `
+            -DBACKEND_DIR="$PWD/desktop/src-tauri/resources/dehkhoda-server" `
+            -DQDRANT_DIR="$PWD/desktop/src-tauri/resources/sidecars/qdrant" `
+            -DVERSION="${{ env.VERSION }}" -DSUFFIX="-full" `
+            installer/windows/nsis.nsi
+      - name: Sign installers (if certificate secret present)
         if: env.WINDOWS_CERTIFICATE != ''
         env:
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
@@ -302,42 +405,52 @@ jobs:
           [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
           $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
             Select-Object -First 1 -ExpandProperty FullName
-          & $signtool sign /f $pfx /p "$env:WINDOWS_CERTIFICATE_PASSWORD" `
-            /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
-            "installer/windows/dehkhoda-setup-win-${{ env.VERSION }}.exe"
+          foreach ($v in @("lean", "full")) {
+            & $signtool sign /f $pfx /p "$env:WINDOWS_CERTIFICATE_PASSWORD" `
+              /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
+              "installer/windows/dehkhoda-setup-win-${{ env.VERSION }}-$v.exe"
+          }
           Remove-Item $pfx
       - name: SHA256 + collect
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist-win | Out-Null
           # NSIS writes OutFile next to the .nsi script (installer/windows/).
-          $setup = "installer/windows/dehkhoda-setup-win-${{ env.VERSION }}.exe"
-          if (-not (Test-Path $setup)) {
-            Write-Error "installer not found at $setup"; exit 1
+          $failed = $false
+          foreach ($v in @("lean", "full")) {
+            $src = "installer/windows/dehkhoda-setup-win-${{ env.VERSION }}-$v.exe"
+            if (-not (Test-Path $src)) { Write-Error "installer not found at $src"; $failed = $true; continue }
+            Copy-Item $src dist-win/
+            $h = (Get-FileHash "dist-win\dehkhoda-setup-win-${{ env.VERSION }}-$v.exe" -Algorithm SHA256).Hash.ToLower()
+            "$h  dehkhoda-setup-win-${{ env.VERSION }}-$v.exe" | Add-Content dist-win\SHA256SUMS.txt
           }
-          Copy-Item $setup dist-win/
-          $h = (Get-FileHash "dist-win\dehkhoda-setup-win-${{ env.VERSION }}.exe" -Algorithm SHA256).Hash.ToLower()
-          "$h  dehkhoda-setup-win-${{ env.VERSION }}.exe" | Set-Content dist-win\SHA256SUMS.txt
+          if ($failed) { exit 1 }
           Get-Content dist-win\SHA256SUMS.txt
       - uses: actions/upload-artifact@v4
         with:
           name: dehkhoda-windows
           path: |
-            dist-win/dehkhoda-setup-win-${{ env.VERSION }}.exe
+            dist-win/dehkhoda-setup-win-${{ env.VERSION }}-full.exe
+            dist-win/dehkhoda-setup-win-${{ env.VERSION }}-lean.exe
             dist-win/SHA256SUMS.txt
           retention-days: 14
 
   # ================================================== GitHub Release
   release:
-    name: github-release
-    needs: [container-tests, windows-bootstrap, build-linux, linux-acceptance, build-windows]
+    name: github-release (4 variants + SHA256SUMS.all)
+    needs: [container-tests, windows-bootstrap, model-cache, build-linux,
+            linux-acceptance, build-windows]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: dehkhoda-linux
+          name: dehkhoda-linux-full
+          path: rel
+      - uses: actions/download-artifact@v4
+        with:
+          name: dehkhoda-linux-lean
           path: rel
       - uses: actions/download-artifact@v4
         with:
@@ -347,14 +460,56 @@ jobs:
         with:
           name: dehkhoda-windows
           path: rel
-      - name: Merge checksums
+      - name: Build SHA256SUMS.all (covers every released asset, clearly labeled)
         run: |
           cd rel
-          cat SHA256SUMS SHA256SUMS.txt > SHA256SUMS.all 2>/dev/null || true
           ls -la
+          sha256sum \
+            ./Dehkhoda.RAG_*-full.AppImage \
+            ./Dehkhoda.RAG_*-lean.AppImage \
+            ./*.deb \
+            ./*.pkg.tar.zst \
+            ./dehkhoda-setup-win-*-full.exe \
+            ./dehkhoda-setup-win-*-lean.exe \
+            > SHA256SUMS.all
+          cat SHA256SUMS.all
+      - name: Compose Persian release description with real sizes
+        run: |
+          FULL_APPIMAGE=$(ls rel/Dehkhoda.RAG_*-full.AppImage | head -1)
+          LEAN_APPIMAGE=$(ls rel/Dehkhoda.RAG_*-lean.AppImage | head -1)
+          FULL_MB=$(( $(stat -c%s "$FULL_APPIMAGE") / 1000000 ))
+          LEAN_MB=$(( $(stat -c%s "$LEAN_APPIMAGE") / 1000000 ))
+          MODEL_MB=$(python3 -c "import json;print(json.load(open('bootstrap/pins.json'))['embedding_model']['total_size_bytes']//1000000)")
+          REVISION=$(python3 -c "import json;print(json.load(open('bootstrap/pins.json'))['embedding_model']['revision'])")
+          cat > RELEASE_BODY.md <<EOF
+          دو نسخه از همین برنامه منتشر شده است — هر دو از یک کد، با یک پرچم ساخت:
+
+          ## نسخهٔ کامل (آفلاین) — شامل مدل زبانی، حدود ${FULL_MB} مگابایت
+          * فایل‌ها: \`Dehkhoda.RAG_*-full.AppImage\` (لینوکس)، \`dehkhoda-setup-win-*-full.exe\` (ویندوز)
+          * مدل زبانی داخل بسته است؛ پس از دانلود، **هیچ اتصال اینترنتی لازم نیست**
+          * مدل: multilingual-e5-base — آثار انگشت همهٔ فایل‌ها با pins.json تأیید می‌شود (revision \`${REVISION}\`)
+
+          ## نسخهٔ سبک (دانلود در اولین اجرا) — حدود ${LEAN_MB} مگابایت
+          * فایل‌ها: \`Dehkhoda.RAG_*-lean.AppImage\` (لینوکس)، \`dehkhoda-setup-win-*-lean.exe\` (ویندوز)
+          * در اولین اجرا، مدل زبانی حدود **${MODEL_MB} مگابایت** از huggingface.co دانلود می‌شود
+            (با نوار پیشرفت، سرعت، زمان باقی‌مانده، امکان لغو و ادامهٔ دانلود از همان‌جا)
+          * بعد از همان دانلود اولیه، برنامه کاملاً آفلاین است؛ اگر اینترنت ندارید، نسخهٔ کامل را برگزینید
+
+          ## بسته‌های توزیع
+          * \`*.deb\` — دبیان/اوبونتو (نسخهٔ کامل؛ آفلاین)
+          * \`*.pkg.tar.zst\` — آرچ
+
+          ## صحت فایل‌ها
+          * \`SHA256SUMS.all\` همهٔ فایل‌ها را پوشش می‌دهد: \`sha256sum -c SHA256SUMS.all\`
+          EOF
+      - name: Verify SHA256SUMS.all with sha256sum -c (release-page parity check)
+        run: |
+          cd rel
+          sha256sum -c SHA256SUMS.all
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
+          body_path: RELEASE_BODY.md
           files: |
             rel/*.AppImage
             rel/*.deb

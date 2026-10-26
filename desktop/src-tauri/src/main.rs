@@ -29,6 +29,12 @@ use std::os::windows::process::CommandExt;
 struct SidecarState {
     child: Mutex<Option<Child>>,
     port: Mutex<Option<u16>>,
+    // the running wizard-step child (bootstrap --step ...) so the UI can
+    // cancel long steps (e.g. the lean model download) mid-flight; killing
+    // it is safe: the downloader only renames files after sha256 verified
+    // them, so .partial residue stays resumable.
+    boot_child: Mutex<Option<Child>>,
+    boot_cancelled: Mutex<bool>,
 }
 
 #[derive(Serialize)]
@@ -321,7 +327,10 @@ fn run_bootstrap_blocking(
         Ok(c) => c,
         Err(e) => return json_err(&format!("spawn: {e}")),
     };
+    *state.boot_cancelled.lock().unwrap() = false;
     let stdout = child.stdout.take();
+    *state.boot_child.lock().unwrap() = Some(child);
+
     let mut final_line = json_err("no result event emitted");
     if let Some(out) = stdout {
         let reader = BufReader::new(out);
@@ -334,7 +343,14 @@ fn run_bootstrap_blocking(
             }
         }
     }
-    let _ = child.wait();
+    // reap the child (bootstrap_cancel may have taken it already)
+    let taken = state.boot_child.lock().unwrap().take();
+    if let Some(mut c) = taken {
+        let _ = c.wait();
+    }
+    if *state.boot_cancelled.lock().unwrap() {
+        return json_cancelled();
+    }
     final_line
 }
 
@@ -342,6 +358,29 @@ fn json_err(msg: &str) -> String {
     serde_json::json!({"t": "result", "ok": false, "error_code": "shell",
                        "error_fa": "خطای پوستهٔ برنامه", "detail": msg})
         .to_string()
+}
+
+fn json_cancelled() -> String {
+    serde_json::json!({"t": "result", "ok": false, "error_code": "cancelled",
+                       "error_fa": "این گام لغو شد؛ وضعیت ناقص برای ادامه حفظ شده است.",
+                       "cancelled": true})
+        .to_string()
+}
+
+/// Cancel the running wizard step (model download Cancel button).
+/// Returns true when a step was actually killed.
+#[tauri::command]
+fn bootstrap_cancel(state: State<SidecarState>) -> bool {
+    *state.boot_cancelled.lock().unwrap() = true;
+    let child = state.boot_child.lock().unwrap().take();
+    match child {
+        Some(mut c) => {
+            let _ = c.kill();
+            let _ = c.wait();
+            true
+        }
+        None => false,
+    }
 }
 
 fn pick_free_port() -> u16 {
@@ -388,6 +427,8 @@ fn main() {
             app.manage(SidecarState {
                 child: Mutex::new(None),
                 port: Mutex::new(None),
+                boot_child: Mutex::new(None),
+                boot_cancelled: Mutex::new(false),
             });
             // Only auto-start the HTTP sidecar on a completed install; a
             // first-run user lands in the wizard which drives steps instead.
@@ -407,6 +448,7 @@ fn main() {
             setup_state,
             start_backend,
             bootstrap_run,
+            bootstrap_cancel,
             backend_log
         ])
         .build(tauri::generate_context!())

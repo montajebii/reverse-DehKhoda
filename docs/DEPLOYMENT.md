@@ -30,18 +30,87 @@ text, results grouped/deduplicated by headword.
 
 ## 1. End-user install (both OSes)
 
-1. Install the desktop bundle produced by CI (`scripts/package_tauri_*`):
-   * Linux: `.deb` / `.AppImage` from `desktop/src-tauri/target/release/bundle/`
-   * Windows: NSIS `.exe` installer from the same path
+1. Pick a **release variant** (see §1b) from the GitHub Release page:
+   * Linux: `Dehkhoda.RAG_<version>_amd64-full.AppImage` or
+     `Dehkhoda.RAG_<version>_amd64-lean.AppImage` (plus the offline `.deb`)
+   * Windows: `dehkhoda-setup-win-<version>-full.exe` or
+     `dehkhoda-setup-win-<version>-lean.exe`
 2. Launch **Dehkhoda RAG**. The shell picks a free port, spawns the bundled
    `dehkhoda-server` sidecar and waits for `GET /health` (up to 5 min).
-3. First run: the vector store is empty. Either
-   * press nothing — the UI reports «۰ مدخل بارگذاری شده», or
-   * trigger ingestion once (see §3). After it finishes, the data is durable
-     (flush + verified restart persistence) and every later launch is instant.
+3. First run: the setup wizard walks you through خوش آمدید → بررسی سیستم →
+   موتور → مدل زبانی → لغت‌نامه → آماده است (see §1b for the model step).
+   After ingestion the data is durable (flush + verified restart persistence)
+   and every later launch is instant.
 
 No `pip install`, no config-file editing, no Docker CLI usage is required of
 the end user.
+
+---
+
+## 1b. Release variants — full vs lean (v1.3.0)
+
+Both variants are built from the SAME codebase and behave identically
+(same wizard, same Qdrant engine chain, same UI, same logs); they differ in
+exactly one build flag — `DEHKHODA_BUNDLE_MODEL=1` — which decides whether
+the pinned embedding model ships inside the package.
+
+| | **full (آفلاین)** | **lean (سبک)** |
+|---|---|---|
+| Embedding model | **bundled** inside the package (`_internal/models/<revision>/`) | **not bundled** — downloaded on first run |
+| Internet after download | **never** (zero network requests, verified by a `--network none` CI test) | only the one-time model download; everything else offline |
+| Download size | ≈ full package (model adds ~1.1 GB) | ≈ 250–400 MB smaller |
+| First-run wizard model step | «مدل زبانی همراه بسته نصب شد.» — sha256 verified once against `pins.json` (warn-only, never blocks) | dedicated step: exact size, disk check (2× model size), HEAD reachability probe (5 s), progress bar with **file + speed + ETA**, **Cancel** (partials kept), **resume across restarts**, sha256 verify → `.ready` |
+| Best for | offline machines, metered/unreliable networks, fleet installs | smaller download, machines with decent connectivity |
+| Linux artifact | `Dehkhoda.RAG_<v>_amd64-full.AppImage`, `Dehkhoda RAG_<v>_amd64.deb` | `Dehkhoda.RAG_<v>_amd64-lean.AppImage` |
+| Windows artifact | `dehkhoda-setup-win-<v>-full.exe` | `dehkhoda-setup-win-<v>-lean.exe` |
+
+### The pinned model (both variants use the identical pin)
+
+`bootstrap/pins.json → embedding_model` pins
+`intfloat/multilingual-e5-base` to an immutable revision (commit SHA) and
+carries the **sha256 + size of every one of the 9 files**. The lean download
+streams each file from `<resolve_base>/<revision>/<path>` (the same
+immutable URL `huggingface_hub.hf_hub_download(revision=<sha>)` would hit),
+resumes via HTTP Range from `<file>.partial`, and renames a file to its
+final name **only after its sha256 matches the pin**. A checksum mismatch
+deletes the file, retries once, then fails with a Persian error card that
+carries the exact URL / HTTP status / DNS error in the «جزئیات فنی» panel.
+
+Completion markers: `<models>/<revision>/.complete-<revision>` plus
+`<models>/.ready` = `{"revision": ..., "source": "bundled|downloaded"}` —
+subsequent runs skip the whole model step in **< 100 ms** (no hashing).
+
+### CI guarantees (per release)
+
+* `model-cache` job: downloads the pinned revision once per `pins.json`
+  change, verifies **every file's sha256**, packs `model-e5.tar.gz`
+  (layout `models/<revision>/…`), caches + uploads it as an artifact.
+* Acceptance runs the packaged AppImage in 4 distro containers
+  (ubuntu:24.04, debian:12, fedora, archlinux) × both variants with
+  `--network none`: full proves the **bundled** model verifies + a real e5
+  dense hybrid probe works offline; lean proves the **pre-seeded** data-dir
+  model is accepted offline (CI never depends on live HuggingFace here).
+* `SHA256SUMS.all` covers every released asset; `sha256sum -c SHA256SUMS.all`
+  verifies a download in one command.
+
+### Building a specific variant locally
+
+```bash
+# both variants (needs the verified model tarball for full)
+python3 scripts/fetch_pinned_model.py --dest model-e5 --tar model-e5.tar.gz
+DEHKHODA_VARIANTS="full lean" DEHKHODA_MODEL_TARBALL="$PWD/model-e5.tar.gz" \
+  bash installer/linux/appimage.sh
+# → dist-linux/Dehkhoda.RAG_<v>_amd64-{full,lean}.AppImage (+ .deb from full)
+
+# full only, fetching the model straight from the pinned revision
+DEHKHODA_VARIANTS="full" bash installer/linux/appimage.sh
+# lean only (no model anywhere in the pipeline)
+DEHKHODA_VARIANTS="lean" bash installer/linux/appimage.sh
+```
+
+Windows (NSIS): stage resources without the model →
+`makensis -DSUFFIX=-lean …`; then extract the model tarball into
+`resources/dehkhoda-server/_internal/` → `makensis -DSUFFIX=-full …`.
 
 ---
 

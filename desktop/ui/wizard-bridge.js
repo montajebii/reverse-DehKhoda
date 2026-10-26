@@ -54,5 +54,16 @@
     }
   }
 
-  window.WizardBridge = { invoke, runStep, onWizardEvent, isTauri, hasMock: !!mock };
+  /** Kill the running wizard step (model download Cancel button).
+   *  Partial downloads are preserved on purpose — the next start resumes. */
+  async function cancelStep() {
+    try {
+      if (mock && mock.invoke) return await mock.invoke("bootstrap_cancel", {});
+      return await tauri.core.invoke("bootstrap_cancel", {});
+    } catch {
+      return false;
+    }
+  }
+
+  window.WizardBridge = { invoke, runStep, cancelStep, onWizardEvent, isTauri, hasMock: !!mock };
 })();

@@ -30,7 +30,8 @@ class Emitter:
         self.log_lines: list[str] = []
 
     def progress(self, pct: Optional[int] = None, task_fa: str = "",
-                 log: str = "", indet: bool = False) -> None:
+                 log: str = "", indet: bool = False,
+                 data: Optional[dict[str, Any]] = None) -> None:
         import time
 
         now = time.time()
@@ -41,8 +42,13 @@ class Emitter:
             emit({"t": "log", "step": self.step, "log": log}) if log else None
             return
         self._last = now
-        emit({"t": "progress", "step": self.step, "pct": pct, "task_fa": task_fa,
-              "log": log, "indet": indet})
+        msg: dict[str, Any] = {"t": "progress", "step": self.step, "pct": pct,
+                               "task_fa": task_fa, "log": log, "indet": indet}
+        if data is not None:
+            # structured progress (model_download v1.3): {file, bytes_done,
+            # bytes_total, speed_bps, eta_seconds, overall_percent, phase}
+            msg["dl"] = data
+        emit(msg)
 
     def result(self, ok: bool, data: Optional[dict] = None,
                error_code: str = "", error_fa: str = "") -> None:

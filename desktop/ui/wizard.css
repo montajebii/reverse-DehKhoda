@@ -169,6 +169,32 @@
   white-space: pre-wrap;
 }
 
+/* model step (v1.3.0): download meta, live dl line, offline URL */
+.dl-line {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 6px 0 2px;
+  font-variant-numeric: tabular-nums;
+}
+.model-meta {
+  margin: 8px 0 0; padding-inline-start: 18px;
+  display: grid; gap: 6px; font-size: 13px; color: var(--text);
+}
+.model-meta .mono, .mono {
+  font-family: "Sarasa Mono SC", "Consolas", monospace;
+  font-size: 11.5px;
+  direction: ltr; unicode-bidi: embed;
+  word-break: break-all;
+}
+.model-url {
+  margin-top: 10px; padding: 8px 10px;
+  background: var(--surface-2); border: 1px dashed var(--border);
+  border-radius: 8px; font-size: 12px; color: var(--text);
+  direction: ltr; text-align: left;
+  font-family: "Sarasa Mono SC", "Consolas", monospace;
+  word-break: break-all; user-select: all;
+}
+
 /* ready screen */
 .ready-hero { text-align: center; padding: 30px 10px; }
 .ready-hero .big { font-size: 52px; margin-bottom: 8px; }

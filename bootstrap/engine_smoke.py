@@ -160,11 +160,86 @@ def _probe_milvus(em: Emitter, dim: int) -> dict[str, Any]:
     return {"engine": "milvus", "detail": "standalone reachable", "hybrid_hits": None}
 
 
+def _probe_dense(em: Emitter, dim: int) -> dict[str, Any]:
+    """REAL dense-lane gate (v1.3.0): load the pinned e5 weights and run a
+    hybrid (dense+sparse+RRF) search with genuine embeddings.
+
+    Used by the release acceptance to prove, inside `--network none`
+    containers, that:
+      * the FULL variant loads its bundled model with zero network access;
+      * the LEAN variant accepts a pre-seeded data-dir model offline.
+    The model dir comes from DEHKHODA_MODEL_DIR (state_env resolution:
+    bundled dir for full, seeded models/<revision> for lean).
+    """
+    import os as _os
+
+    from app.config import Settings
+
+    from . import paths
+
+    model_dir = _os.environ.get("DEHKHODA_MODEL_DIR", "")
+    if not model_dir or not (Path(model_dir) / "model.safetensors").exists():
+        raise RuntimeError(
+            f"no usable model dir resolved (DEHKHODA_MODEL_DIR={model_dir!r}; "
+            "bundled=" + str(paths.bundled_model_dir()) + ")")
+    em.progress(log=f"dense probe loading e5 from {model_dir}")
+
+    from app.embeddings.provider import get_embedder
+
+    settings = Settings(
+        backend="qdrant", embedder="e5-base", dense_dim=768,
+        model_dir=model_dir,
+        qdrant_mode="local",
+        qdrant_path=str(Path(tempfile.mkdtemp(prefix="dh-smoke-dense-"))
+                        / "qdrant"),
+        collection_name="dehkhoda_smoke",
+        data_dir=Path(tempfile.mkdtemp(prefix="dh-smoke-dense-data-")),
+    )
+    emb = get_embedder(settings)
+    docs = [
+        "آب: مایعی بی‌رنگ که در دریا، باران و چشمه یافت می‌شود.",
+        "آتش: سوزشی که چوب و هیزم را می‌سوزاند و نور و گرما می‌دهد.",
+        "کتابخانه: جایگاه نگهداری کتاب‌ها برای خواندن و امانت.",
+    ]
+    qvec = emb.embed_query("مایعی که از آسمان می‌بارد")
+    dvecs = emb.embed_documents(docs)
+    if len(qvec) != 768 or len(dvecs) != 3:
+        raise RuntimeError(f"unexpected embedding shapes q={len(qvec)}")
+
+    from app.vector_store.base import Record
+
+    from app.vector_store.qdrant_backend import QdrantBackend
+
+    sparse = [{3: 0.5, 7: 1.0}, {1: 0.9}, {5: 0.8, 11: 0.3}]
+    recs = [
+        Record(doc_id=f"d{i}", word_id=i + 1, word=w, chunk_index=0,
+               definition=docs[i], doc=docs[i], dense=dvecs[i], sparse=sparse[i])
+        for i, w in enumerate(("آب", "آتش", "کتابخانه"))
+    ]
+    b = QdrantBackend(settings)
+    b.connect()
+    try:
+        b.ensure_collection(dim=768, recreate=True)
+        b.insert(recs)
+        hits = b.hybrid_search(qvec, sparse[0], top_k=3)
+    finally:
+        b.close()
+    if not hits:
+        raise RuntimeError("dense hybrid_search returned 0 hits")
+    top = hits[0]
+    word = top.get("word") if isinstance(top, dict) else getattr(top, "word", "")
+    em.progress(log=f"dense probe top hit: {word!r}")
+    return {"engine": "dense_e5", "model_dir": model_dir,
+            "detail": "real e5 dense+sparse+RRF probe",
+            "hybrid_hits": len(hits), "top_word": word}
+
+
 _PROBES = {
     "qdrant_local": _probe_qdrant_local,
     "qdrant_native": _probe_qdrant_native,
     "milvus_lite": _probe_milvus_lite,
     "milvus": _probe_milvus,
+    "dense": _probe_dense,
 }
 
 

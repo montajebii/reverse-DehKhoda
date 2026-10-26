@@ -114,7 +114,9 @@ window.__MOCK__ = (() => {
       const i = args.indexOf("--set");
       if (i >= 0) {
         const kv = args[i + 1], eq = kv.indexOf("=");
-        const k = kv.slice(0, eq), v = JSON.parse(kv.slice(eq + 1));
+        const k = kv.slice(0, eq);
+        let v = kv.slice(eq + 1);
+        try { v = JSON.parse(v); } catch (e) { /* lenient like cli.py */ }
         state[k] = v;
       }
       await delay(40);
@@ -145,12 +147,35 @@ window.__MOCK__ = (() => {
         state.embedder = "hash";
         return {t: "result", step: "model", ok: true, data: {skipped: true, embedder: "hash"}};
       }
+      if (args.includes("--preflight")) {
+        return {t: "result", step: "model", ok: true, data: {variant: "lean", preflight: {
+          repo_id: "intfloat/multilingual-e5-base",
+          revision: "d128750597153bb5987e10b1c3493a34e5a4502a",
+          total_size_bytes: 1134355035, need_bytes: 2268710070,
+          disk_free_bytes: 96.4e9, disk_ok: true,
+          network_ok: true, network_error: "",
+          target_dir: "~/.local/share/dehkhoda/models/d128750597153bb5987e10b1c3493a34e5a4502a",
+          files: [{path: "model.safetensors", size: 1112201288},
+                  {path: "tokenizer.json", size: 17082660}],
+          partial: null, already_ready: false}}};
+      }
+      const TOTAL = 1112201288;
       for (let p = 0; p <= 100; p += 10) {
         window.__mockEmit(JSON.stringify({t: "progress", step: "model", pct: p,
-          task_fa: "دانلود مدل زبانی…", log: "model.safetensors " + p + "%"}));
+          task_fa: "در حال دانلود: model.safetensors — " +
+            Math.round(TOTAL * p / 100 / 1048576) + " از " +
+            Math.round(TOTAL / 1048576) + " مگابایت",
+          log: "model.safetensors " + p + "%",
+          dl: {file: "model.safetensors",
+               bytes_done: Math.round(TOTAL * p / 100), bytes_total: TOTAL,
+               speed_bps: 4200000 + p * 9000,
+               eta_seconds: Math.max(1, Math.round((100 - p) * 1.4)),
+               overall_percent: p, phase: "downloading"}}));
         await delay(90);
       }
-      return {t: "result", step: "model", ok: true, data: {dir: "~/.local/share/dehkhoda/models"}};
+      return {t: "result", step: "model", ok: true,
+              data: {status: "ready", dir: "~/.local/share/dehkhoda/models/d128750597153bb5987e10b1c3493a34e5a4502a",
+                     source: "downloaded", revision: "d128750597153bb5987e10b1c3493a34e5a4502a"}};
     }
     if (step === "ingest") {
       window.__mockEmit(JSON.stringify({t: "progress", step: "dictionary", task_fa: "دانلود داده‌های لغت‌نامه (۲۹۰ مگابایت، قابل ادامه)…", indet: true}));
@@ -175,6 +200,7 @@ window.__MOCK__ = (() => {
       if (cmd === "setup_state") return clone(state);
       if (cmd === "start_backend") return {port: 8300, ready: true};
       if (cmd === "bootstrap_run") return await run(args.step, args.args);
+      if (cmd === "bootstrap_cancel") return true;
       throw new Error("mock: unknown cmd " + cmd);
     },
   };
@@ -202,16 +228,16 @@ def make_mock_js(scenario: str) -> str:
     fn_js = """
 function(rep, consent){
   const d = rep.docker;
-  if (d.installed && d.running) return {path:'milvus',reasons:['docker_available'],needs:[]};
   const installable = rep.os.type==='windows'
       ? !!(rep.windows && rep.windows.winget)
       : !!(rep.linux && rep.linux.pkexec && rep.os.package_manager);
+  if (d.installed && d.running) return {path:'milvus',reasons:['docker_available'],needs:[],advanced:['milvus']};
   if (installable && consent === null || installable && consent === undefined)
-      return {path:'milvus_pending_consent',reasons:['docker_installable'],needs:['ask_docker_consent']};
+      return {path:'milvus_pending_consent',reasons:['docker_installable'],needs:['ask_docker_consent'],advanced:['milvus']};
   if (installable && consent === true)
-      return {path:'milvus',reasons:['docker_installable'],needs:['install_docker']};
+      return {path:'milvus',reasons:['docker_installable'],needs:['install_docker'],advanced:['milvus']};
   if (rep.os.type==='windows')
-      return {path:'qdrant_native',reasons:['docker_declined','qdrant_native_fallback'],needs:[]};
+      return {path:'qdrant_native',reasons:['docker_declined','qdrant_native_fallback'],needs:[],advanced:['milvus']};
   if (rep.python.bundled && rep.milvus_lite.available)
       return {path:'milvus_lite',reasons:['docker_declined','milvus_lite_available'],needs:[]};
   return {path:'qdrant_native',
@@ -263,8 +289,12 @@ def run_scenario(browser, base_url: str, scenario: str) -> list[str]:
 
     snap("2-system")
     if scenario == "ubuntu-fresh":
-        # consent panel appears on prereqs
-        page.get_by_text("ادامه", exact=True).first.click()  # -> prereqs
+        # v1.2+ wizard: the default Qdrant path skips prereqs entirely; the
+        # Milvus/consent flow lives behind the advanced chooser on step 2.
+        # the advanced Milvus chooser lives inside a closed <details>
+        page.get_by_text("حالت پیشرفته: موتور Milvus با داکر").click()
+        page.wait_for_timeout(200)
+        page.get_by_text("انتخاب Milvus", exact=False).first.click()
         page.wait_for_timeout(300)
         snap("3-consent")
         page.get_by_text("ادامه (نصب داکر)").click()
@@ -272,19 +302,24 @@ def run_scenario(browser, base_url: str, scenario: str) -> list[str]:
         snap("4-db-launch")
         page.wait_for_timeout(1800)
     else:  # windows-declined
-        page.get_by_text("ادامه", exact=True).first.click()
+        page.get_by_text("حالت پیشرفته: موتور Milvus با داکر").click()
+        page.wait_for_timeout(200)
+        page.get_by_text("انتخاب Milvus", exact=False).first.click()
         page.wait_for_timeout(300)
         snap("3-consent")
         page.get_by_text("رد کردن", exact=True).click()
         page.wait_for_timeout(2500)  # qdrant fallback db
         snap("4-db-fallback")
 
-    # model step (auto-advanced)
+    # model step (v1.3.0 lean UX): pre-flight -> «شروع دانلود» -> dl line
     page.wait_for_timeout(400)
     snap("5-model")
-    page.get_by_text("ادامه (دانلود)").click()
-    page.wait_for_timeout(1600)
+    page.get_by_role("button", name="شروع دانلود").click()
+    page.wait_for_timeout(500)
     snap("5-model-downloading")
+    page.wait_for_selector(".dl-line:not([hidden])", timeout=4000)
+    assert "در حال دانلود" in page.locator(".dl-line").inner_text(), \
+        "dl line must show file/speed/eta"
 
     # ingest step (auto-advanced after model completes)
     page.wait_for_timeout(2500)

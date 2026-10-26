@@ -3,14 +3,27 @@
 # installer/linux/appimage.sh — one-file Linux distributable (AppImage + deb)
 #
 # Bundles: Tauri shell + PyInstaller backend (full profile) + Qdrant engine
-# sidecar (tauri.conf.json bundle.externalBin) + wizard assets. The DEFAULT
-# engine is Qdrant — the AppImage is fully self-contained: no Docker, no
-# user installs, no elevation. Docker/Milvus is an optional advanced mode.
+# sidecar + wizard assets. The DEFAULT engine is Qdrant — the AppImage is
+# fully self-contained: no Docker, no user installs, no elevation.
+# Docker/Milvus is an optional advanced mode.
+#
+# v1.3.0 RELEASE VARIANTS (same codebase, one build flag):
+#   DEHKHODA_VARIANTS="full lean"  — build BOTH release artifacts:
+#     full: the pinned e5 model is copied into the sidecar bundle
+#           (_internal/models/multilingual-e5-base) → zero internet needed
+#     lean: no model inside → downloaded on first run (wizard UX)
+#   The .deb is produced in the FULL pass only (offline-complete package).
+#
+# Model source for the full variant (first match wins):
+#   DEHKHODA_MODEL_TARBALL  tar.gz with layout models/multilingual-e5-base/…
+#                           (CI model-cache job, sha256-verified upstream)
+#   DEHKHODA_MODEL_SRC      an already-verified model directory
+#   (none)                  download the pinned revision now (CI fallback)
 #
 # Inputs (env, all optional):
 #   DEHKHODA_SKIP_BACKEND_BUILD=1   reuse backend/dist/dehkhoda-server
-#   TAURI_BUNDLES                   default "appimage deb"
-# Output: dist-linux/  (AppImage, .deb, SHA256SUMS)
+#   TAURI_BUNDLES                   default "appimage deb" (full pass)
+# Output: dist-linux/  (variant-renamed AppImages, .deb, SHA256SUMS)
 # =============================================================================
 set -euo pipefail
 
@@ -20,6 +33,10 @@ OUT="${ROOT}/dist-linux"
 ARCH="$(uname -m)"
 TARGET="${ARCH}"           # pins.json arch key
 QDRANT_DIR="${RES}/sidecars/qdrant"
+VARIANTS="${DEHKHODA_VARIANTS:-full}"
+MODEL_DIRNAME="multilingual-e5-base"
+MODEL_REVISION="$(python3 -c "import json;print(json.load(open('${ROOT}/bootstrap/pins.json'))['embedding_model']['revision'])")"
+APP_VERSION="$(python3 -c "import json;print(json.load(open('${ROOT}/desktop/src-tauri/tauri.conf.json'))['version'])")"
 
 log() { printf '\n\033[1;36m[appimage]\033[0m %s\n' "$*"; }
 
@@ -115,13 +132,36 @@ fi
 mkdir -p "${OUT}"
 sha256sum "${QDRANT_DIR}/qdrant" | awk '{print $1}' > "${OUT}/qdrant-sha256.txt"
 
-# ------------------------------------------------------- 3. tauri appimage+deb
-log "building Tauri bundles: ${TAURI_BUNDLES:-appimage deb}"
-mkdir -p "${RES}/dehkhoda-server"
-rm -rf "${RES}/dehkhoda-server"/*
-cp -r "${ROOT}/backend/dist/dehkhoda-server/." "${RES}/dehkhoda-server/"
-chmod +x "${RES}/dehkhoda-server/dehkhoda-server"
+# ------------------------------------------------- 3. stage the model (full)
+# Resolve the pinned model once so every full-variant pass uses identical,
+# pins-verified bytes. Prefer the CI-cached tarball; fall back to an
+# explicit dir; last resort: download the pinned revision right now.
+MODEL_TARBALL=""
+if [ -n "${DEHKHODA_MODEL_TARBALL:-}" ] && [ -f "${DEHKHODA_MODEL_TARBALL}" ]; then
+  MODEL_TARBALL="${DEHKHODA_MODEL_TARBALL}"
+elif [ -n "${DEHKHODA_MODEL_SRC:-}" ] && [ -f "${DEHKHODA_MODEL_SRC}/config.json" ]; then
+  log "packing model tarball from DEHKHODA_MODEL_SRC=${DEHKHODA_MODEL_SRC}"
+  python3 "${ROOT}/scripts/fetch_pinned_model.py" --from-dir "${DEHKHODA_MODEL_SRC}" \
+    --tar "${OUT}/model-e5.tar.gz"
+  MODEL_TARBALL="${OUT}/model-e5.tar.gz"
+else
+  log "no model tarball provided — downloading the pinned revision (CI fallback)"
+  python3 "${ROOT}/scripts/fetch_pinned_model.py" \
+    --dest "${OUT}/model-e5" --tar "${OUT}/model-e5.tar.gz"
+  MODEL_TARBALL="${OUT}/model-e5.tar.gz"
+fi
+if [ "${VARIANTS}" != "lean" ]; then
+  # verify the tarball bytes BEFORE staging (defense in depth: the CI cache
+  # step already verified, but this build must not trust a stale cache)
+  VERIFY_DIR="$(mktemp -d)"
+  tar -xzf "${MODEL_TARBALL}" -C "${VERIFY_DIR}"
+  python3 "${ROOT}/scripts/fetch_pinned_model.py" --from-dir \
+    "${VERIFY_DIR}/models/${MODEL_REVISION}" >/dev/null
+  log "model tarball verified against pins.json: ${MODEL_TARBALL}"
+  rm -rf "${VERIFY_DIR}"
+fi
 
+# ------------------------------------------------------- 4. tauri per variant
 cd "${ROOT}/desktop"
 npm install --no-fund --no-audit
 
@@ -132,18 +172,48 @@ log "AppImage env: APPIMAGE_EXTRACT_AND_RUN=${APPIMAGE_EXTRACT_AND_RUN:-<unset>}
 export APPIMAGE_EXTRACT_AND_RUN="${APPIMAGE_EXTRACT_AND_RUN:-1}"
 export NO_STRIP="${NO_STRIP:-true}"
 
-# NOTE: --bundles is variadic in current Tauri CLI (clap). Quoting the
-# default would pass "appimage deb" as a single token and Tauri rejects it
-# ("invalid value 'appimage deb' for '--bundles'"). Leave unquoted so the
-# default word-splits into two args: --bundles appimage deb.
-npx tauri build --bundles ${TAURI_BUNDLES:-appimage deb}
+for VARIANT in ${VARIANTS}; do
+  log "=== building variant: ${VARIANT} ==="
+  # fresh staging every pass (a model left over from a previous pass would
+  # silently turn a lean build into a full one)
+  rm -rf "${RES}/dehkhoda-server"
+  mkdir -p "${RES}/dehkhoda-server"
+  cp -r "${ROOT}/backend/dist/dehkhoda-server/." "${RES}/dehkhoda-server/"
+  chmod +x "${RES}/dehkhoda-server/dehkhoda-server"
 
-# ---------------------------------------------------------------- 4. collect
+  if [ "${VARIANT}" = "full" ]; then
+    mkdir -p "${RES}/dehkhoda-server/_internal/models"
+    tar -xzf "${MODEL_TARBALL}" -C "${RES}/dehkhoda-server/_internal"
+    log "model staged into _internal/models ($(du -sh "${RES}/dehkhoda-server/_internal/models" | cut -f1))"
+    BUNDLES="${TAURI_BUNDLES:-appimage deb}"
+  else
+    BUNDLES="${TAURI_BUNDLES_LEAN:-appimage}"
+  fi
+
+  # NOTE: --bundles is variadic in current Tauri CLI (clap). Quoting the
+  # default would pass "appimage deb" as a single token and Tauri rejects it
+  # ("invalid value 'appimage deb' for '--bundles'"). Leave unquoted so the
+  # default word-splits into two args: --bundles appimage deb.
+  npx tauri build --bundles ${BUNDLES}
+
+  # ---- collect + rename to the release naming convention
+  mkdir -p "${OUT}"
+  for appimg in "${ROOT}/desktop/src-tauri/target/release/bundle/appimage/"*.AppImage; do
+    [ -e "$appimg" ] || continue
+    dest="${OUT}/Dehkhoda.RAG_${APP_VERSION}_${ARCH}-${VARIANT}.AppImage"
+    cp -f "$appimg" "${dest}"
+    log "AppImage: ${dest} ($(wc -c < "${dest}") bytes)"
+  done
+  if [ "${VARIANT}" = "full" ]; then
+    find "${ROOT}/desktop/src-tauri/target/release/bundle" \
+         \( -name "*.deb" -o -name "*.pkg.tar.zst" \) -exec cp -v {} "${OUT}/" \;
+  fi
+done
+
+# ---------------------------------------------------------------- 5. collect
 log "collecting artifacts"
-mkdir -p "${OUT}"
-find "${ROOT}/desktop/src-tauri/target/release/bundle" \
-     \( -name "*.AppImage" -o -name "*.deb" \) -exec cp -v {} "${OUT}/" \;
 cd "${OUT}"
-sha256sum ./*.AppImage ./*.deb > SHA256SUMS 2>/dev/null || true
+sha256sum ./*.AppImage ./*.deb > SHA256SUMS 2>/dev/null || \
+  sha256sum ./*.AppImage > SHA256SUMS
 log "done:"
 ls -lh "${OUT}"

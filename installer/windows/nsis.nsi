@@ -9,7 +9,16 @@
 ;   makensis -DAPP_EXE=...\dehkhoda-rag.exe ^
 ;            -DBACKEND_DIR=...\resources\dehkhoda-server ^
 ;            -DQDRANT_DIR=...\resources\sidecars\qdrant ^
-;            -DVERSION=1.2.0 installer\windows\nsis.nsi
+;            -DVERSION=1.3.0 [-DSUFFIX=-full|-DSUFFIX=-lean] ^
+;            installer\windows\nsis.nsi
+;
+; v1.3.0 release variants: SUFFIX renames the installer so both variants can
+; be produced from the same script in one CI job:
+;   dehkhoda-setup-win-<version>-full.exe   (BACKEND_DIR already contains the
+;                                            staged _internal\models tree)
+;   dehkhoda-setup-win-<version>-lean.exe   (BACKEND_DIR without the model)
+; The model is staged into BACKEND_DIR\_internal\models BEFORE makensis runs,
+; so no extra define is needed — File /r simply picks it up.
 ;
 ; Signing: if the certificate env is provided in CI (WINDOWS_CERTIFICATE +
 ; WINDOWS_CERTIFICATE_PASSWORD), signtool signs the built installer after
@@ -26,12 +35,15 @@
 !ifndef VERSION
   !define VERSION "0.0.0"
 !endif
+!ifndef SUFFIX
+  !define SUFFIX ""
+!endif
 
 !include "MUI2.nsh"
 !include "FileFunc.nsh"
 
 Name "Dehkhoda RAG ${VERSION}"
-OutFile "dehkhoda-setup-win-${VERSION}.exe"
+OutFile "dehkhoda-setup-win-${VERSION}${SUFFIX}.exe"
 InstallDir "$PROGRAMFILES64\Dehkhoda RAG"
 InstallDirRegKey HKLM "Software\DehkhodaRAG" "InstallDir"
 RequestExecutionLevel admin
