@@ -92,17 +92,21 @@ dest.unlink()
 print("qdrant ready:", qdir / "qdrant")
 PYEOF
 
-# tauri.conf.json bundle.externalBin requires the binary under its
-# target-triple name; Tauri installs it next to the main executable.
-TRIPLE="x86_64-unknown-linux-gnu"
-cp -f "${QDRANT_DIR}/qdrant" "${QDRANT_DIR}/qdrant-${TRIPLE}"
-chmod +x "${QDRANT_DIR}/qdrant-${TRIPLE}"
-log "qdrant externalBin ready: qdrant-${TRIPLE}"
-# record the SOURCE binary digest so the container acceptance tests can
-# verify the copies inside the AppImage were not altered in transit
+# ---------------------------------------------------------------- 2b. qdrant.gz
+# The AppImage bundler (linuxdeploy) runs patchelf on EVERY ELF it finds in
+# AppDir/usr/bin and usr/lib — that REWRITES our static musl qdrant binary
+# (+1.4 MB, different sha256) and it SIGSEGVs at start. Bundle the binary
+# GZIPPED instead: linuxdeploy ignores non-ELF files, and the launcher
+# self-extracts a pristine, sha256-verified copy to the writable bin dir
+# on first launch (bootstrap/backend_launcher._qdrant_from_bundled_gz).
+# NOTE: bundle.externalBin was REMOVED from tauri.conf.json for exactly this
+# reason — its usr/bin copy is corrupted by the bundler.
+gzip -9 -kf "${QDRANT_DIR}/qdrant"
+sha256sum "${QDRANT_DIR}/qdrant" | awk '{print $1}' > "${QDRANT_DIR}/qdrant.sha256"
+log "qdrant.gz ready ($(wc -c < "${QDRANT_DIR}/qdrant.gz") bytes) sha256=$(cat "${QDRANT_DIR}/qdrant.sha256")"
+# source digest for the acceptance tests (raw binary)
 mkdir -p "${OUT}"
 sha256sum "${QDRANT_DIR}/qdrant" | awk '{print $1}' > "${OUT}/qdrant-sha256.txt"
-log "qdrant source sha256: $(cat "${OUT}/qdrant-sha256.txt")"
 
 # ------------------------------------------------------- 3. tauri appimage+deb
 log "building Tauri bundles: ${TAURI_BUNDLES:-appimage deb}"

@@ -331,6 +331,70 @@ def smoke_milvus_lite(em: Emitter) -> bool:
 # =========================================================================
 # qdrant — the DEFAULT engine (local embedded mode + native sidecar)
 # =========================================================================
+def _sha256_file(path: Path) -> str:
+    import hashlib
+
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _qdrant_from_bundled_gz() -> Optional[Path]:
+    """Extract the bundled, gzip-compressed qdrant engine to the bin dir.
+
+    The AppImage bundler (linuxdeploy) runs patchelf over every ELF it finds
+    in AppDir/usr/bin and usr/lib — that rewrites a static musl binary
+    (+1.4 MB) and it SIGSEGVs at start. The engine therefore ships
+    GZIP-compressed (linuxdeploy ignores non-ELF files) and is extracted
+    here — sha256-verified against the bundled .sha256 (or the pin) — to the
+    writable bin dir, which also survives read-only installs.
+
+    Returns the executable path, or None when no bundled .gz exists
+    (the pinned download path then applies).
+    """
+    gz = paths.bundled("sidecars/qdrant/qdrant.gz")
+    gz_env = os.environ.get("DEHKHODA_QDRANT_GZ")
+    if gz_env and Path(gz_env).exists():
+        gz = Path(gz_env)
+    if not gz.exists():
+        return None
+
+    expected = ""
+    sha_file = gz.with_name("qdrant.sha256")
+    if sha_file.exists():
+        expected = sha_file.read_text(encoding="utf-8").strip().split()[0]
+    if not expected:
+        try:
+            expected = model_fetcher.load_pins()["qdrant"]["files"].get(
+                "linux-x86_64", {}).get("binary_sha256", "")
+        except Exception:
+            expected = ""
+
+    out = paths.bin_dir() / "qdrant"
+    if out.exists() and out.stat().st_size > 1_000_000:
+        if not expected or _sha256_file(out) == expected:
+            return out
+        out.unlink()  # stale/corrupt cache — re-extract below
+
+    import gzip
+    import shutil as _sh
+
+    tmp = out.with_suffix(".tmp")
+    with gzip.open(gz, "rb") as src, open(tmp, "wb") as dst:
+        _sh.copyfileobj(src, dst)
+    actual = _sha256_file(tmp)
+    if expected and actual != expected:
+        tmp.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"bundled qdrant engine failed sha256 verification: "
+            f"expected {expected}, got {actual} (source: {gz})")
+    tmp.replace(out)
+    out.chmod(out.stat().st_mode | 0o111)
+    return out
+
+
 def qdrant_binary() -> Optional[Path]:
     cands: list[Path] = []
     env_bin = os.environ.get("DEHKHODA_QDRANT_BINARY")
@@ -437,7 +501,9 @@ def launch_qdrant_local(em: Emitter) -> dict[str, Any]:
 
 def launch_qdrant(em: Emitter, fetch_if_missing: bool = True) -> dict[str, Any]:
     """Bundled native qdrant sidecar on a random 127.0.0.1 port."""
-    binp = qdrant_binary()
+    binp = _qdrant_from_bundled_gz()
+    if binp is None:
+        binp = qdrant_binary()
     if binp is None and fetch_if_missing:
         em.progress(task_fa="دریافت موتور جایگزین (Qdrant)…", indet=True)
         binp = model_fetcher.fetch_qdrant(

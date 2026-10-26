@@ -33,11 +33,8 @@
     "resources": {
       "resources/dehkhoda-server/": "dehkhoda-server/"
     },
-    "externalBin": [
-      "resources/sidecars/qdrant/qdrant"
-    ],
     "category": "Reference",
     "shortDescription": "Hybrid semantic search over the Dehkhoda Dictionary",
-    "longDescription": "Persian RAG application over the 312,507-entry Dehkhoda Dictionary with dense + BM25 hybrid search (RRF). Self-contained by default: bundled Qdrant engine (no Docker, no installs); Milvus Standalone via Docker is an optional advanced mode."
+    "longDescription": "Persian RAG application over the 312,507-entry Dehkhoda Dictionary with dense + BM25 hybrid search (RRF). Self-contained by default: bundled Qdrant engine, shipped gzip-compressed and sha256-verified at first launch (the AppImage bundler's patchelf pass corrupts ELF sidecars, so the engine is stored compressed and extracted to the user's bin dir). No Docker, no installs; Milvus Standalone via Docker is an optional advanced mode."
   }
 }

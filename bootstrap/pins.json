@@ -23,7 +23,8 @@
     "sha256": "b03a64616a1f41ddab78b480a318466541765f19835318113b1821cbea8df52c",
     "strip_components": 1,
     "binary": "qdrant",
-    "$comment": "musl build is statically linked — runs on every glibc (Debian 12 needs <= 2.36; the gnu build requires GLIBC_2.39 and aborts there)"
+    "binary_sha256": "d60f8c31f7c943849403997562122cce4e3883b7f06936a01187dfd2d2eb81fe",
+    "$comment": "musl build is statically linked — runs on every glibc (Debian 12 needs <= 2.36; the gnu build requires GLIBC_2.39 and aborts there). binary_sha256 verifies the UNPACKED engine after gzip extraction (the AppImage bundler corrupts ELF sidecars, so the engine ships gzip-compressed)."
    },
    "linux-aarch64": {
     "name": "qdrant-aarch64-unknown-linux-musl.tar.gz",

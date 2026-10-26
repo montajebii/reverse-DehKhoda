@@ -7,8 +7,8 @@
 # Asserts, with zero package installation inside the container:
 #   1. the bundled backend engine becomes ready (default fallback chain)
 #   2. a real hybrid (dense + sparse + RRF) search returns hits
-#   3. the bundled Qdrant sidecar binary serves hybrid search — both from a
-#      container-local copy and from the extracted AppImage path
+#   3. the bundled Qdrant sidecar (gzip-compressed resource) is verified and
+#      serves hybrid search after the launcher's self-extraction
 #
 # Exit 0 = all assertions hold.
 # =============================================================================
@@ -26,43 +26,39 @@ BIN=$(find squashfs-root -type f -name dehkhoda-server | head -1)
 [ -n "$BIN" ] || { echo "backend binary not found in AppImage"; exit 1; }
 chmod +x "$BIN"
 
-# Bundled sidecar: the PRISTINE resource copy. (The externalBin copy under
-# usr/bin is processed by the AppImage bundler and must not be trusted.)
-QDRANT=$(find squashfs-root -path "*sidecars/qdrant*" -name qdrant -type f | head -1)
-[ -n "$QDRANT" ] || { echo "qdrant sidecar not bundled in AppImage"; exit 1; }
-chmod +x "$QDRANT"
-
-echo "=== sidecar binary integrity ==="
-EXTRACTED_SHA=$(sha256sum "$QDRANT" | cut -d' ' -f1)
-echo "extracted: $EXTRACTED_SHA"
-if [ -f "$REPO/dist-linux/qdrant-sha256.txt" ]; then
-  echo "expected : $(cat "$REPO/dist-linux/qdrant-sha256.txt")"
-else
-  echo "expected : UNKNOWN"
-fi
-echo "size     : $(wc -c < "$QDRANT") bytes"
-od -A x -t x1z -v "$QDRANT" | head -2
+# Bundled engine: GZIP-COMRESSED on purpose — the AppImage bundler
+# (linuxdeploy) runs patchelf over every ELF in the AppDir and corrupts
+# static binaries (SIGSEGV at start). The launcher verifies + extracts it.
+GZ=$(find squashfs-root -path "*sidecars/qdrant*" -name "qdrant.gz" -type f | head -1)
+[ -n "$GZ" ] || { echo "qdrant.gz engine not bundled in AppImage"; exit 1; }
+echo "=== bundled engine integrity ==="
+echo "gz sha256: $(sha256sum "$GZ" | cut -d' ' -f1)"
+echo "gz bytes : $(wc -c < "$GZ")"
+gunzip -t "$GZ" && echo "gzip integrity: OK"
 
 export DEHKHODA_DATA_DIR=/tmp/dh-ci
+export DEHKHODA_QDRANT_GZ="$GZ"
+
 echo "=== acceptance 1: default engine chain must become ready ==="
 OUT=$("$BIN" bootstrap --step engine-smoke 2>/dev/null | tail -1)
 echo "$OUT"
 echo "$OUT" | grep -q '"ok": *true' || { echo "engine did not become ready"; exit 1; }
 echo "$OUT" | grep -q 'hybrid_hits' || { echo "no hybrid search result"; exit 1; }
 
-# container-local copy — isolates 'corrupted bytes' from 'path issues'
-cp "$QDRANT" /tmp/qdrant-test
-chmod +x /tmp/qdrant-test
-export DEHKHODA_QDRANT_BINARY=/tmp/qdrant-test
-echo "=== acceptance 2a: sidecar from a container-local copy ==="
+echo "=== acceptance 2: bundled qdrant SIDECAR (self-extracted, verified) ==="
 OUT2=$("$BIN" bootstrap --step engine-smoke --engine qdrant_native 2>/dev/null | tail -1)
 echo "$OUT2"
 echo "$OUT2" | grep -q '"ok": *true' || { echo "qdrant sidecar probe failed"; exit 1; }
 
-export DEHKHODA_QDRANT_BINARY="$QDRANT"
-echo "=== acceptance 2b: sidecar from the extracted AppImage path ==="
-OUT3=$("$BIN" bootstrap --step engine-smoke --engine qdrant_native 2>/dev/null | tail -1)
-echo "$OUT3"
-echo "$OUT3" | grep -q '"ok": *true' || { echo "qdrant sidecar probe failed from squashfs path"; exit 1; }
+echo "=== acceptance 3: extracted engine binary digest ==="
+EXTRACTED_BIN=/tmp/dh-ci/bin/qdrant
+[ -f "$EXTRACTED_BIN" ] || { echo "launcher did not extract the engine"; exit 1; }
+echo "extracted: $(sha256sum "$EXTRACTED_BIN" | cut -d' ' -f1)"
+if [ -f "$REPO/dist-linux/qdrant-sha256.txt" ]; then
+  echo "expected : $(cat "$REPO/dist-linux/qdrant-sha256.txt")"
+  A=$(sha256sum "$EXTRACTED_BIN" | cut -d' ' -f1)
+  B=$(cat "$REPO/dist-linux/qdrant-sha256.txt")
+  [ "$A" = "$B" ] || { echo "engine binary digest mismatch"; exit 1; }
+fi
 
 echo "ACCEPTANCE OK"

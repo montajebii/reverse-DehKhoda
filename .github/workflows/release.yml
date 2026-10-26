@@ -135,11 +135,12 @@ jobs:
           "$BIN" bootstrap --step engine-smoke 2>&1 | tail -1 | tee /tmp/smoke-chain.json
           grep -q '"ok": *true' /tmp/smoke-chain.json
           grep -q 'hybrid_hits' /tmp/smoke-chain.json
-      - name: "Build gate: engine smoke — bundled qdrant SIDECAR binary"
+      - name: "Build gate: engine smoke — bundled qdrant SIDECAR (gz self-extract)"
         run: |
           BIN=backend/dist/dehkhoda-server/dehkhoda-server
           export DEHKHODA_DATA_DIR=/tmp/dh-ci
-          export DEHKHODA_QDRANT_BINARY="$PWD/desktop/src-tauri/resources/sidecars/qdrant/qdrant"
+          export DEHKHODA_QDRANT_GZ="$PWD/desktop/src-tauri/resources/sidecars/qdrant/qdrant.gz"
+          unset DEHKHODA_QDRANT_BINARY || true
           "$BIN" bootstrap --step engine-smoke --engine qdrant_native 2>&1 | tail -1 | tee /tmp/smoke-sidecar.json
           grep -q '"ok": *true' /tmp/smoke-sidecar.json
       - name: "Build gate: milvus_lite packaged-binary smoke (Ubuntu engine rule)"
@@ -240,7 +241,7 @@ jobs:
           cd backend
           DEHKHODA_BUNDLE_MODE=onedir DEHKHODA_BUNDLE_PROFILE=full \
             python -m PyInstaller --noconfirm --clean --distpath dist --workpath build dehkhoda-server.spec
-      - name: Fetch pinned qdrant.exe sidecar (plain + externalBin triple name)
+      - name: Fetch pinned qdrant.exe sidecar
         shell: bash
         run: |
           mkdir -p desktop/src-tauri/resources/sidecars/qdrant
@@ -259,10 +260,7 @@ jobs:
               with zf.open(src) as s, open(out, "wb") as d:
                   shutil.copyfileobj(s, d)
           dest.unlink()
-          # tauri.conf.json bundle.externalBin requires the target-triple name
-          triple = Path("desktop/src-tauri/resources/sidecars/qdrant/qdrant-x86_64-pc-windows-msvc.exe")
-          shutil.copyfile(out, triple)
-          print("qdrant.exe ready:", out.stat().st_size, "bytes (+ triple copy)")
+          print("qdrant.exe ready:", out.stat().st_size, "bytes")
           PY
       - name: Bundle resources + Tauri build (no bundler)
         shell: bash
@@ -276,7 +274,6 @@ jobs:
         run: |
           BIN=backend/dist/dehkhoda-server/dehkhoda-server.exe
           export DEHKHODA_DATA_DIR="$PWD/.dh-ci"
-          export DEHKHODA_QDRANT_BINARY="$PWD/desktop/src-tauri/resources/sidecars/qdrant/qdrant.exe"
           "$BIN" bootstrap --step engine-smoke 2>/dev/null | tail -1 | grep -q '"ok": *true'
       - name: Compile NSIS installer
         shell: pwsh

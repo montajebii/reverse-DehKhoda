@@ -104,33 +104,6 @@ fn sidecar_exe(dir: &std::path::Path) -> std::path::PathBuf {
     dir.join(name)
 }
 
-/// Resolve the bundled Qdrant engine binary (tauri.conf.json bundle.externalBin).
-///
-/// Tauri installs external binaries next to the main executable; we also
-/// bundle a pristine copy as a RESOURCE (tauri.linux.conf.json) because the
-/// AppImage bundler (linuxdeploy) runs patchelf on usr/bin binaries and
-/// corrupts static musl executables (SIGSEGV at start). The resource copy is
-/// therefore preferred; the exe-sibling copy is only a fallback (and lets the
-/// deb package work when resources land elsewhere). The resolved path is
-/// passed to the Python launcher via DEHKHODA_QDRANT_BINARY.
-fn qdrant_sidecar_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
-    #[cfg(target_os = "windows")]
-    let name = "qdrant.exe";
-    #[cfg(not(target_os = "windows"))]
-    let name = "qdrant";
-
-    let mut cands: Vec<std::path::PathBuf> = Vec::new();
-    if let Ok(rd) = app.path().resource_dir() {
-        cands.push(rd.join("sidecars").join("qdrant").join(name));
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            cands.push(dir.join(name));
-        }
-    }
-    cands.into_iter().find(|p| p.exists())
-}
-
 fn logs_dir() -> std::path::PathBuf {
     let d = data_dir().join("logs");
     let _ = std::fs::create_dir_all(&d);
@@ -147,13 +120,14 @@ fn open_backend_log() -> std::fs::File {
         .unwrap_or_else(|e| panic!("cannot open backend log {}: {e}", path.display()))
 }
 
-fn spawn_cmd(app: &tauri::AppHandle, bin: &std::path::Path, args: &[String]) -> Command {
+fn spawn_cmd(bin: &std::path::Path, args: &[String]) -> Command {
     let mut cmd = Command::new(bin);
     cmd.args(args);
     cmd.env("DEHKHODA_DATA_DIR", data_dir());
-    if let Some(q) = qdrant_sidecar_path(app) {
-        cmd.env("DEHKHODA_QDRANT_BINARY", &q);
-    }
+    // The bundled Qdrant engine (sidecars/qdrant/qdrant.gz resource) is
+    // resolved + sha256-verified by the Python launcher itself
+    // (bootstrap/backend_launcher._qdrant_from_bundled_gz) — the shell
+    // deliberately knows nothing about it.
     #[cfg(target_os = "windows")]
     {
         // 0x08000000 = CREATE_NO_WINDOW — never flash a shell window
@@ -191,7 +165,7 @@ fn spawn_backend(app: &tauri::AppHandle, port: u16) -> Result<Child, String> {
         )
     };
     let args = vec!["--port".to_string(), port.to_string()];
-    let mut cmd = spawn_cmd(app, &bin, &args);
+    let mut cmd = spawn_cmd(&bin, &args);
     if let Some(d) = cwd {
         cmd.current_dir(d);
     }
@@ -337,7 +311,7 @@ fn run_bootstrap_blocking(
 
     let mut cargs: Vec<String> = vec!["bootstrap".into(), "--step".into(), step];
     cargs.extend(extra);
-    let mut cmd = spawn_cmd(&app, &bin, &cargs);
+    let mut cmd = spawn_cmd(&bin, &cargs);
     if let Some(d) = cwd {
         cmd.current_dir(d);
     }
