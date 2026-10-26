@@ -530,6 +530,15 @@ def launch_qdrant(em: Emitter, fetch_if_missing: bool = True) -> dict[str, Any]:
         "QDRANT__SERVICE__HTTP_PORT": str(port),
         "QDRANT__SERVICE__HOST": "127.0.0.1",
         "QDRANT__STORAGE__STORAGE_PATH": str(storage),
+        # A local-first desktop engine must not phone home, and minimal
+        # systems may ship NO CA certificate bundle — qdrant's telemetry /
+        # inference HTTPS clients PANIC at startup without one:
+        #   reqwest::Error { source: General("No CA certificates were
+        #   loaded from the system") }  ->  exit code 101
+        # (exact failure captured by the sidecar log on debian:12/ubuntu
+        # slim containers; fedora worked only because it preinstalls CAs.)
+        "QDRANT__SERVICE__TELEMETRY_DISABLED": "true",
+        "QDRANT__INFERENCE__DISABLE": "true",
     }
     kwargs: dict[str, Any] = {"env": {**os.environ, **env}}
     if sys.platform.startswith("win"):
