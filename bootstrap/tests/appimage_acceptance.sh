@@ -40,14 +40,18 @@ export DEHKHODA_DATA_DIR=/tmp/dh-ci
 export DEHKHODA_QDRANT_GZ="$GZ"
 
 echo "=== acceptance 1: default engine chain must become ready ==="
-OUT=$("$BIN" bootstrap --step engine-smoke 2>/dev/null | tail -1)
-echo "$OUT"
+ERR1=/tmp/acc1.stderr
+OUT=$("$BIN" bootstrap --step engine-smoke 2>"$ERR1" | tail -1) || true
+if [ -s "$ERR1" ]; then echo "--- stderr ---"; tail -20 "$ERR1"; fi
+echo "${OUT:-<no output>}"
 echo "$OUT" | grep -q '"ok": *true' || { echo "engine did not become ready"; exit 1; }
 echo "$OUT" | grep -q 'hybrid_hits' || { echo "no hybrid search result"; exit 1; }
 
 echo "=== acceptance 2: bundled qdrant SIDECAR (self-extracted, verified) ==="
-OUT2=$("$BIN" bootstrap --step engine-smoke --engine qdrant_native 2>/dev/null | tail -1)
-echo "$OUT2"
+ERR=/tmp/acc2.stderr
+OUT2=$("$BIN" bootstrap --step engine-smoke --engine qdrant_native 2>"$ERR" | tail -1) || true
+if [ -s "$ERR" ]; then echo "--- stderr ---"; tail -30 "$ERR"; fi
+echo "${OUT2:-<no output>}"
 echo "$OUT2" | grep -q '"ok": *true' || { echo "qdrant sidecar probe failed"; exit 1; }
 
 echo "=== acceptance 3: extracted engine binary digest ==="
