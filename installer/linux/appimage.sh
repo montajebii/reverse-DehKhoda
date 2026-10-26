@@ -104,6 +104,13 @@ PYEOF
 gzip -9 -kf "${QDRANT_DIR}/qdrant"
 sha256sum "${QDRANT_DIR}/qdrant" | awk '{print $1}' > "${QDRANT_DIR}/qdrant.sha256"
 log "qdrant.gz ready ($(wc -c < "${QDRANT_DIR}/qdrant.gz") bytes) sha256=$(cat "${QDRANT_DIR}/qdrant.sha256")"
+# qdrant's inference service builds an HTTPS client at startup and PANICS
+# when the system has no CA bundle (minimal distros/containers). Ship the
+# build container's Mozilla-derived bundle and point SSL_CERT_FILE at it.
+if [ -f /etc/ssl/certs/ca-certificates.crt ]; then
+  cp -f /etc/ssl/certs/ca-certificates.crt "${QDRANT_DIR}/ca-bundle.crt"
+  log "CA bundle shipped: $(grep -c 'BEGIN CERT' "${QDRANT_DIR}/ca-bundle.crt") certificates"
+fi
 # source digest for the acceptance tests (raw binary)
 mkdir -p "${OUT}"
 sha256sum "${QDRANT_DIR}/qdrant" | awk '{print $1}' > "${OUT}/qdrant-sha256.txt"

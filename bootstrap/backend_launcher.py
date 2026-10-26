@@ -530,16 +530,22 @@ def launch_qdrant(em: Emitter, fetch_if_missing: bool = True) -> dict[str, Any]:
         "QDRANT__SERVICE__HTTP_PORT": str(port),
         "QDRANT__SERVICE__HOST": "127.0.0.1",
         "QDRANT__STORAGE__STORAGE_PATH": str(storage),
-        # A local-first desktop engine must not phone home, and minimal
-        # systems may ship NO CA certificate bundle — qdrant's telemetry /
-        # inference HTTPS clients PANIC at startup without one:
-        #   reqwest::Error { source: General("No CA certificates were
-        #   loaded from the system") }  ->  exit code 101
-        # (exact failure captured by the sidecar log on debian:12/ubuntu
-        # slim containers; fedora worked only because it preinstalls CAs.)
-        "QDRANT__SERVICE__TELEMETRY_DISABLED": "true",
-        "QDRANT__INFERENCE__DISABLE": "true",
+        # top-level key (NOT service.telemetry_disabled) — a local-first
+        # desktop engine must not phone home.
+        "QDRANT__TELEMETRY_DISABLED": "true",
     }
+    # qdrant's inference service ALWAYS builds an HTTPS client at startup
+    # (InferenceService::init_global -> reqwest/rustls with NATIVE root
+    # certs) and PANICS when the system has no CA bundle:
+    #   "No CA certificates were loaded from the system" -> exit 101
+    # Minimal distros/containers ship none. Ship our own (the build
+    # container's Mozilla-derived ca-certificates.crt, a non-ELF text file
+    # the bundler leaves untouched) and point reqwest at it via the
+    # standard SSL_CERT_FILE probe.
+    ca = paths.bundled("sidecars/qdrant/ca-bundle.crt")
+    if ca.exists():
+        env["SSL_CERT_FILE"] = str(ca)
+        env["SSL_CERT_DIR"] = ""
     kwargs: dict[str, Any] = {"env": {**os.environ, **env}}
     if sys.platform.startswith("win"):
         kwargs["creationflags"] = CREATE_NO_WINDOW

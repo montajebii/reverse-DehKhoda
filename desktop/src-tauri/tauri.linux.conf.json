@@ -3,7 +3,8 @@
   "bundle": {
     "resources": {
       "resources/sidecars/qdrant/qdrant.gz": "sidecars/qdrant/qdrant.gz",
-      "resources/sidecars/qdrant/qdrant.sha256": "sidecars/qdrant/qdrant.sha256"
+      "resources/sidecars/qdrant/qdrant.sha256": "sidecars/qdrant/qdrant.sha256",
+      "resources/sidecars/qdrant/ca-bundle.crt": "sidecars/qdrant/ca-bundle.crt"
     }
   }
 }
