@@ -83,6 +83,8 @@ jobs:
         run: python bootstrap/tests/test_decision_table.py
       - name: "state_env regression (v1.3.0 NameError: Path in resolve_model_dir)"
         run: python bootstrap/tests/test_state_env.py
+      - name: "events ascii-safety (cp1252 UnicodeEncodeError on Windows pipes)"
+        run: python bootstrap/tests/test_events_ascii.py
 
   # ================================================== Pinned model cache
   # ONE download of the pinned e5 revision per pins.json change; the tarball
@@ -356,6 +358,7 @@ jobs:
         run: |
           BIN=backend/dist/dehkhoda-server/dehkhoda-server.exe
           export DEHKHODA_DATA_DIR="$PWD/.dh-ci"
+          export PYTHONUTF8=1 PYTHONIOENCODING=utf-8   # Windows pipes default to cp1252
           # stderr is captured (not discarded) so a gate failure shows the
           # real traceback in the job log — the v1.3.0 NameError was invisible
           # behind 2>/dev/null and cost a full re-run to diagnose
@@ -394,6 +397,7 @@ jobs:
         run: |
           BIN=backend/dist/dehkhoda-server/dehkhoda-server.exe
           export DEHKHODA_DATA_DIR="$PWD/.dh-ci"
+          export PYTHONUTF8=1 PYTHONIOENCODING=utf-8   # Windows pipes default to cp1252
           "$BIN" bootstrap --step model --check >gate-model.json 2>gate-model.err \
             || { echo 'model --check gate FAILED:'; cat gate-model.err; exit 1; }
           tail -1 gate-model.json | grep -q '"ok": *true' \

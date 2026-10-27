@@ -17,7 +17,14 @@ from typing import Any, Optional
 
 
 def emit(obj: dict[str, Any]) -> None:
-    print(json.dumps(obj, ensure_ascii=False), flush=True)
+    # ensure_ascii=True is REQUIRED, not cosmetic: this JSONL travels over a
+    # pipe whose encoding we do not control. On Windows the child sidecar
+    # inherits the ANSI codepage (cp1252 on en-US) and print() of Persian
+    # task_fa text raises UnicodeEncodeError — killing the wizard step
+    # (v1.3.0 CI: "Build gate: bundled model verify + real e5 dense probe").
+    # Pure-ASCII JSON (u06XX escapes) round-trips through JSON.parse on the
+    # JS side losslessly and is safe on EVERY codepage.
+    print(json.dumps(obj), flush=True)
 
 
 class Emitter:
