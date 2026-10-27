@@ -311,7 +311,8 @@ def step_model(args) -> None:
             state.mark_step("model")
             em.result(True, data={"status": "ready", "dir": str(tdir),
                                   "source": "downloaded",
-                                  "revision": model_download.revision()})
+                                  "revision": model_download.revision(),
+                                  "verified": True})
             return
         em.progress(log="incomplete model dir removed: " + ", ".join(bad))
 
@@ -373,6 +374,7 @@ def step_model(args) -> None:
         em.result(True, data={"status": "ready", "dir": str(d),
                               "source": "downloaded",
                               "revision": model_download.revision(),
+                              "verified": True,
                               "message_fa": "مدل زبانی دانلود و تأیید شد."})
     except model_download.DownloadCancelled:
         partial = model_download.detect_partial() or {}
