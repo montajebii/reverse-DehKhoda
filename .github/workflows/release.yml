@@ -81,6 +81,8 @@ jobs:
           Write-Host "no-docker scenario OK"
       - name: "Decision table: Windows + docker declined -> qdrant_native; Linux default -> qdrant"
         run: python bootstrap/tests/test_decision_table.py
+      - name: "state_env regression (v1.3.0 NameError: Path in resolve_model_dir)"
+        run: python bootstrap/tests/test_state_env.py
 
   # ================================================== Pinned model cache
   # ONE download of the pinned e5 revision per pins.json change; the tarball
@@ -354,7 +356,13 @@ jobs:
         run: |
           BIN=backend/dist/dehkhoda-server/dehkhoda-server.exe
           export DEHKHODA_DATA_DIR="$PWD/.dh-ci"
-          "$BIN" bootstrap --step engine-smoke 2>/dev/null | tail -1 | grep -q '"ok": *true'
+          # stderr is captured (not discarded) so a gate failure shows the
+          # real traceback in the job log — the v1.3.0 NameError was invisible
+          # behind 2>/dev/null and cost a full re-run to diagnose
+          "$BIN" bootstrap --step engine-smoke >gate.json 2>gate.err \
+            || { echo 'engine-smoke gate FAILED:'; cat gate.err; exit 1; }
+          tail -1 gate.json | grep -q '"ok": *true' \
+            || { echo 'engine-smoke gate not ok:'; cat gate.json gate.err; exit 1; }
       - name: Compile NSIS installer (LEAN)
         shell: pwsh
         run: |
@@ -386,8 +394,14 @@ jobs:
         run: |
           BIN=backend/dist/dehkhoda-server/dehkhoda-server.exe
           export DEHKHODA_DATA_DIR="$PWD/.dh-ci"
-          "$BIN" bootstrap --step model --check 2>/dev/null | tail -1 | grep -q '"ok": *true'
-          "$BIN" bootstrap --step engine-smoke --engine dense 2>/dev/null | tail -1 | grep -q '"ok": *true'
+          "$BIN" bootstrap --step model --check >gate-model.json 2>gate-model.err \
+            || { echo 'model --check gate FAILED:'; cat gate-model.err; exit 1; }
+          tail -1 gate-model.json | grep -q '"ok": *true' \
+            || { echo 'model --check gate not ok:'; cat gate-model.json gate-model.err; exit 1; }
+          "$BIN" bootstrap --step engine-smoke --engine dense >gate-dense.json 2>gate-dense.err \
+            || { echo 'engine-smoke dense gate FAILED:'; cat gate-dense.err; exit 1; }
+          tail -1 gate-dense.json | grep -q '"ok": *true' \
+            || { echo 'engine-smoke dense gate not ok:'; cat gate-dense.json gate-dense.err; exit 1; }
       - name: Compile NSIS installer (FULL)
         shell: pwsh
         run: |

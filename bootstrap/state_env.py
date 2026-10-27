@@ -23,6 +23,7 @@ Safe to call repeatedly; runtime-driven values always win over state.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from . import paths, state
 
