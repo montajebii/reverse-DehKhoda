@@ -24,7 +24,13 @@ from .mysql_dump_parser import clean_html, iter_dump, make_document
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = "https://raw.githubusercontent.com/nimah79/Dehkhoda-SQL/master"
+# v1.3.1 (PART 2 closure): the dataset URL is PINNED to the immutable
+# commit sha from bootstrap/pins.json -> dehkhoda_dataset.commit — the old
+# `master` branch ref made this code path a moving target and an accidental
+# network fetch of arbitrary bytes. Kept in sync with pins.json by
+# bootstrap/tests/test_pins_sync.py (this module cannot import bootstrap).
+BASE_URL = ("https://raw.githubusercontent.com/nimah79/Dehkhoda-SQL/"
+            "185ed68bc6ad7c4244c5f4cc1c9968aa8aefa0f4")
 DUMP_FILES = [
     "01-A", "02-Alef", "03-Be", "04-Pe", "05-Te", "06-Se", "07-Jim", "08-Che",
     "09-He", "10-Khe", "11-Dal", "12-Zal", "13-Re", "14-Ze", "15-Zhe", "16-Sin",

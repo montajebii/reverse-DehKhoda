@@ -3,6 +3,18 @@
    Design tokens in :root / [data-theme="dark"]; Vazirmatn bundled.
    ============================================================ */
 
+/* v1.3.1 zero-network guarantee (PART 2 §4): the UI font is BUNDLED and
+   referenced with a same-origin RELATIVE path — never a CDN (no
+   fonts.googleapis.com / gstatic / jsdelivr). Tauri serves the UI from
+   tauri://localhost, so this resolves inside the app with zero DNS. */
+@font-face {
+  font-family: "Vazirmatn";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("fonts/Vazirmatn-Regular.woff2") format("woff2");
+}
+
 :root {
   --bg: #f4f6f9;
   --surface: #ffffff;

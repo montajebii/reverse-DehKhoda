@@ -49,6 +49,17 @@ def main() -> int:
     os.environ.setdefault("DEHKHODA_HOST", args.host)
     os.environ["DEHKHODA_PORT"] = str(args.port)
 
+    # v1.3.1 zero-network activation for the HTTP sidecar path: the full
+    # variant (bundle manifest with "index": true, or DEHKHODA_NO_NETWORK=1
+    # set by the Rust shell) gets the HF offline switches + socket guard
+    # before any app import; lean builds are a no-op.
+    try:
+        from bootstrap.net_guard import activate
+
+        activate()
+    except Exception:
+        pass
+
     import uvicorn
 
     # Import the app lazily so --help stays fast.

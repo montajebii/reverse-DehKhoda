@@ -116,6 +116,35 @@ fn logs_dir() -> std::path::PathBuf {
     d
 }
 
+/// v1.3.1 zero-network guarantee (PART 2 §1/§2): the FULL variant's bundle
+/// manifest (_internal/bundle.json, staged by appimage.sh / the NSIS step)
+/// declares what is bundled. When the prebuilt index is bundled we set the
+/// HuggingFace offline switches and DEHKHODA_NO_NETWORK=1 BEFORE spawning
+/// the Python sidecar — the Python net_guard then hard-fails any outbound
+/// socket. The Tauri shell itself never makes external requests (all UI
+/// assets are local), so this covers every process we control.
+fn is_full_variant(dir: &std::path::Path) -> bool {
+    let manifest = dir.join("_internal").join("bundle.json");
+    std::fs::read_to_string(manifest)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|v| v.get("index").and_then(|b| b.as_bool()))
+        .unwrap_or(false)
+}
+
+fn apply_offline_env(cmd: &mut Command, dir: &std::path::Path) {
+    if !is_full_variant(dir) {
+        return;
+    }
+    cmd.env("DEHKHODA_NO_NETWORK", "1");
+    cmd.env("HF_HUB_OFFLINE", "1");
+    cmd.env("TRANSFORMERS_OFFLINE", "1");
+    cmd.env("HF_DATASETS_OFFLINE", "1");
+    cmd.env("HF_HUB_DISABLE_TELEMETRY", "1");
+    cmd.env("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1");
+    cmd.env("DISABLE_TELEMETRY", "1");
+}
+
 fn open_backend_log() -> std::fs::File {
     let path = logs_dir().join("backend.log");
     std::fs::OpenOptions::new()
@@ -126,10 +155,15 @@ fn open_backend_log() -> std::fs::File {
         .unwrap_or_else(|e| panic!("cannot open backend log {}: {e}", path.display()))
 }
 
-fn spawn_cmd(bin: &std::path::Path, args: &[String]) -> Command {
+fn spawn_cmd(bin: &std::path::Path, args: &[String], dir: Option<&std::path::Path>) -> Command {
     let mut cmd = Command::new(bin);
     cmd.args(args);
     cmd.env("DEHKHODA_DATA_DIR", data_dir());
+    // v1.3.1: full variant (bundled prebuilt index) -> HF offline switches
+    // + DEHKHODA_NO_NETWORK=1 before the sidecar starts.
+    if let Some(d) = dir {
+        apply_offline_env(&mut cmd, d);
+    }
     // The bundled Qdrant engine (sidecars/qdrant/qdrant.gz resource) is
     // resolved + sha256-verified by the Python launcher itself
     // (bootstrap/backend_launcher._qdrant_from_bundled_gz) — the shell
@@ -171,7 +205,7 @@ fn spawn_backend(app: &tauri::AppHandle, port: u16) -> Result<Child, String> {
         )
     };
     let args = vec!["--port".to_string(), port.to_string()];
-    let mut cmd = spawn_cmd(&bin, &args);
+    let mut cmd = spawn_cmd(&bin, &args, cwd.as_deref());
     if let Some(d) = cwd {
         cmd.current_dir(d);
     }
@@ -317,7 +351,8 @@ fn run_bootstrap_blocking(
 
     let mut cargs: Vec<String> = vec!["bootstrap".into(), "--step".into(), step];
     cargs.extend(extra);
-    let mut cmd = spawn_cmd(&bin, &cargs);
+    let cwd_opt = cwd.clone();
+    let mut cmd = spawn_cmd(&bin, &cargs, cwd_opt.as_deref());
     if let Some(d) = cwd {
         cmd.current_dir(d);
     }

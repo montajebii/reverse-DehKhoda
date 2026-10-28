@@ -170,6 +170,81 @@ def volume_dir() -> Path:
     return p
 
 
+def bundled_manifest() -> dict:
+    """Build-time variant manifest (v1.3.1) — _internal/bundle.json.
+
+    Written by installer/linux/appimage.sh (and the Windows NSIS staging
+    step in release.yml) for the FULL variant:
+        {"variant": "full", "model": true, "dataset": true, "index": true}
+    Lean builds ship no manifest ({} is returned). The manifest is the
+    single source of truth for the zero-network guard (net_guard.activate)
+    and the index-restore branches in backend_launcher/cli.
+    """
+    for cand in (app_dir() / "_internal" / "bundle.json",
+                 app_dir() / "bundle.json",
+                 app_dir().parent / "bundle.json"):
+        try:
+            if cand.exists():
+                data = json.loads(cand.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    return data
+        except (OSError, ValueError):
+            continue
+    return {}
+
+
+def bundled_dumps_dir() -> Optional[Path]:
+    """Read-only dir of the 33 pinned .sql.gz dumps (full variant only).
+
+    Staged by the build into _internal/dumps/. Returns None for lean
+    builds or when the staging is missing/empty.
+    """
+    bases = [
+        app_dir() / "_internal" / "dumps",
+        app_dir() / "dumps",
+        app_dir().parent / "dumps",
+    ]
+    for base in bases:
+        try:
+            if base.is_dir() and any(base.glob("*.sql.gz")):
+                return base
+        except OSError:
+            continue
+    return None
+
+
+def bundled_snapshot() -> Optional[Path]:
+    """Gzipped prebuilt Qdrant snapshot shipped INSIDE the package (full).
+
+    Staged at _internal/index/dehkhoda.snapshot.gz (+ a .sha256 sidecar).
+    Restoring requires the native qdrant sidecar (server mode) — the
+    qdrant-client LOCAL mode explicitly does not support snapshots.
+    """
+    for base in (app_dir() / "_internal" / "index",
+                 app_dir() / "index",
+                 app_dir().parent / "index"):
+        try:
+            if base.is_dir():
+                hits = sorted(base.glob("*.snapshot.gz")) or \
+                    sorted(base.glob("*.snapshot.tar.gz"))
+                if hits:
+                    return hits[0]
+        except OSError:
+            continue
+    return None
+
+
+def index_ready_path() -> Path:
+    """Marker for the restored/built vector index (v1.3.1).
+
+    JSON payload mirrors pins.prebuilt_index so staleness is detectable:
+        {qdrant_version, model_revision, dataset_sha, record_count,
+         snapshot_sha256, restored_at, mode}
+    Subsequent runs reach "ready" in <2s by reading this file alone.
+    """
+    return data_dir() / "index.ready"
+
+
 def bundled_compose_file() -> Path:
     return bundled("deploy/docker-compose.yml")
 

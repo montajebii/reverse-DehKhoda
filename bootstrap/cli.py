@@ -481,6 +481,16 @@ STEPS = {
 
 
 def main(argv: list[str] | None = None) -> int:
+    # v1.3.1 zero-network activation FIRST — before any step (and before any
+    # HF-adjacent import): the full variant sets the HF offline env switches
+    # and installs the socket guard; lean builds are a no-op.
+    try:
+        from .net_guard import activate
+
+        _ = activate()
+    except Exception:  # the guard must never brick the wizard itself
+        pass
+
     ap = argparse.ArgumentParser(prog="dehkhoda-server bootstrap")
     ap.add_argument("--step", required=True, choices=sorted(STEPS))
     ap.add_argument("--consent", type=int, default=None, choices=(0, 1))

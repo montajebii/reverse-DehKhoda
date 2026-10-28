@@ -242,5 +242,21 @@
    }
   ],
   "total_bytes": 53956669
+ },
+ "prebuilt_index": {
+  "$comment": "v1.3.1 prebuilt Qdrant snapshot pin. The CI job build-index-snapshot generates the snapshot ONCE per release with the EXACT production ingestion pipeline, then verifies every field below. snapshot_sha256/snapshot_size_bytes/record_count are filled by the first successful CI run (small follow-up commit before the tag is pushed); later runs FAIL THE BUILD on any mismatch. Restoring requires the NATIVE qdrant sidecar in server mode — qdrant-client local mode does not support snapshots, so the full variant always launches qdrant_native first.",
+  "qdrant_version": "v1.20.0",
+  "embedding_model_revision": "d128750597153bb5987e10b1c3493a34e5a4502a",
+  "dataset_commit_sha": "185ed68bc6ad7c4244c5f4cc1c9968aa8aefa0f4",
+  "format": "qdrant_snapshot",
+  "collection_name": "dehkhoda",
+  "dense_dim": 768,
+  "distance": "Cosine",
+  "sparse_metric": "IP",
+  "record_count": 0,
+  "$comment_record_count": "record_count is the Qdrant collection points_count of the BUILT snapshot (filled by CI from the restored collection), NOT the source row count of the Dehkhoda SQL dump. Source-row integrity (USABLE_ROWS=312506) is asserted upstream in build-index-snapshot BEFORE the snapshot is created, so the snapshot is guaranteed to contain every usable row; the acceptance test then only verifies the snapshot restores fully (points_count == record_count).",
+  "snapshot_sha256": "",
+  "snapshot_size_bytes": 0,
+  "built_at": ""
  }
 }

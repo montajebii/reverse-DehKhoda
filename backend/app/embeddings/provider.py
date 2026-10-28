@@ -14,11 +14,38 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+# v1.3.1 zero-network guarantee (PART 2 §1): sentence-transformers and
+# transformers contact huggingface.co on import/model-load unless told not
+# to. These switches MUST be set before the first sentence_transformers
+# import. Mirrors bootstrap.net_guard.OFFLINE_ENV (kept in sync by
+# bootstrap/tests/test_pins_sync.py — this module cannot import bootstrap:
+# the backend tests run with backend/ alone on sys.path).
+HF_OFFLINE_ENV: dict[str, str] = {
+    "HF_HUB_OFFLINE": "1",
+    "TRANSFORMERS_OFFLINE": "1",
+    "HF_DATASETS_OFFLINE": "1",
+    "HF_HUB_DISABLE_TELEMETRY": "1",
+    "HF_HUB_DISABLE_IMPLICIT_TOKEN": "1",
+    "DISABLE_TELEMETRY": "1",
+}
+
+
+def apply_hf_offline_env() -> None:
+    """Set the HF offline switches (idempotent, setdefault semantics).
+
+    Called from provider._ensure_model right before the heavy import and
+    from the sidecar entrypoints (bootstrap.cli.main / entry.main via
+    net_guard.activate) so NO transformers import ever happens without it.
+    """
+    for k, v in HF_OFFLINE_ENV.items():
+        os.environ.setdefault(k, v)
 
 _MODEL_DIMS = {"e5-base": 768, "bge-m3": 1024, "hash": 256}
 
@@ -45,10 +72,19 @@ class EmbeddingProvider:
 
     def _ensure_model(self):  # pragma: no cover - heavy path
         if self._model is None:
+            apply_hf_offline_env()  # MUST precede the sentence_transformers import
             from sentence_transformers import SentenceTransformer
 
-            logger.info("loading embedding model %s on %s ...", self.model_name, self.device)
-            self._model = SentenceTransformer(self.model_name, device=self.device)
+            # local_files_only=True: never resolve from the hub, even as a
+            # "just check for updates" round-trip. The model id is either a
+            # local directory (bundled/downloaded weights) or, in dev, the
+            # hub id — with the offline env set the hub path fails fast
+            # instead of silently phoning home.
+            local_only = Path(self.model_name).is_dir()
+            logger.info("loading embedding model %s on %s (local_files_only=%s) ...",
+                        self.model_name, self.device, local_only)
+            self._model = SentenceTransformer(self.model_name, device=self.device,
+                                              local_files_only=local_only)
         return self._model
 
     def _encode(self, texts: list[str], prefix: str, batch_size: int = 32) -> list[list[float]]:
