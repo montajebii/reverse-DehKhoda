@@ -143,12 +143,19 @@ B.onWizardEvent((obj) => {
       }
       // structured download progress (model_download v1.3):
       // {file, bytes_done, bytes_total, speed_bps, eta_seconds, overall_percent}
+      // v1.3.1 restore progress: {stage, bytes_done, bytes_total, duration_ms}
       if (obj.dl && liveProgress.dlLine) {
-        liveProgress.dlLine.hidden = false;
         const d = obj.dl;
-        liveProgress.dlLine.textContent =
-          (d.phase === "verified" ? "تأیید شد: " : "در حال دانلود: ") +
-          d.file + " — " + faSpeed(d.speed_bps) + " — مانده " + faEta(d.eta_seconds);
+        liveProgress.dlLine.hidden = false;
+        if (d.stage) {
+          liveProgress.dlLine.textContent =
+            (RESTORE_STAGE_FA[d.stage] || "در حال بازیابی…") +
+            (d.duration_ms ? " — " + faEta(Math.round(d.duration_ms / 1000)) : "");
+        } else {
+          liveProgress.dlLine.textContent =
+            (d.phase === "verified" ? "تأیید شد: " : "در حال دانلود: ") +
+            d.file + " — " + faSpeed(d.speed_bps) + " — مانده " + faEta(d.eta_seconds);
+        }
       }
     }
   }
@@ -754,11 +761,81 @@ async function doModelRun(skip) {
 }
 
 /* =========================================================================
-   STEP 6 — آماده‌سازی لغت‌نامه دهخدا
+   STEP 6 — آماده‌سازی لغت‌نامه دهخدا (v1.3.1: one step, three behaviors)
+   full (bundled index):   «بازیابی ایندکس آماده» — progress by restore
+                           stage, NO network section, NO download URLs;
+                           any network attempt fails with the PART 2 §7
+                           Persian message.
+   full (bundled dumps):   «ساخت مجدد از داده‌های همراه» (fallback; explicit)
+   lean:                   existing download + ingest + resume UX.
+   Both: a record-count verification line on success.
    ========================================================================= */
+/* PART 2 §7 — shown verbatim whenever a network attempt is detected in the
+   full variant (the backend net_guard raises NetworkAttemptError with the
+   same text; the wizard's canary is the error_code network_blocked) */
+const NETWORK_BLOCKED_FA =
+  "این نسخه نباید به اینترنت متصل شود. اگر این پیام را می‌بینید، " +
+  "لطفاً بستهٔ نسخهٔ کامل را دوباره دانلود کنید.";
+const RESTORE_STAGE_FA = {
+  verify: "بررسی اثر انگشت ایندکس همراه…",
+  extract: "بازکردن ایندکس فشرده…",
+  restore: "بازیابی ایندکس آماده (حدود ۳۰ ثانیه)…",
+  count: "شمارش مدخل‌ها…",
+  ready: "آماده‌سازی نهایی…",
+};
+
+function variantFull() { return modelVariant() === "full"; }
+
 async function renderDictionary() {
   S.currentStep = "dictionary";
   markStep(6, "active");
+  if (variantFull()) return renderDictionaryFull();
+  return renderDictionaryClassic();
+}
+
+async function renderDictionaryFull() {
+  setHead("آماده‌سازی لغت‌نامه دهخدا",
+    "ایندکس آمادهٔ همراه همین بسته بازیابی می‌شود؛ به اینترنت نیازی نیست و " +
+    "هیچ داده‌ای دانلود نمی‌شود.");
+  clearPanel();
+  setStatus("off", "در حال بازیابی ایندکس آماده…");
+  const c = el("div", "wcard");
+  c.appendChild(el("p", null,
+    "ایندکس برداری آماده داخل بسته است؛ در چند ثانیه بازیابی و تأیید می‌شود."));
+  $panelBody.appendChild(c);
+
+  const res = await runStep("ingest", [], c);
+  $panelActions.replaceChildren();
+  if (!res.ok) {
+    clearPanel();
+    if (res.error_code === "network_blocked") {
+      // PART 2 §7 — explicit Persian failure for ANY network attempt
+      const err = errorCard("اتصال شبکه مسدود شد", NETWORK_BLOCKED_FA,
+        (res.log_tail || []).join("\n"));
+      $panelBody.appendChild(err);
+      $panelActions.append(
+        button("تلاش مجدد", "btn-primary", renderDictionaryFull),
+        button("انصراف", "btn-ghost", cancelWizard));
+      setStatus("err", "این نسخه نباید به اینترنت متصل شود");
+      return;
+    }
+    const err = el("div", "wcard error-card");
+    err.appendChild(el("h3", null, "بازیابی ایندکس متوقف شد"));
+    err.appendChild(el("p", null, esc(res.error_fa || "")));
+    // never-silent fallback: the backend may fall back to a rebuild from
+    // the bundled SQL — surface that in the retry flow
+    $panelBody.appendChild(err);
+    $panelActions.append(
+      button("تلاش مجدد", "btn-primary", renderDictionaryFull),
+      button("انصراف", "btn-ghost", cancelWizard)
+    );
+    setStatus("err", "بازیابی متوقف شد");
+    return;
+  }
+  dictionaryDoneCard(res.data || {}, true);
+}
+
+async function renderDictionaryClassic() {
   setHead("آماده‌سازی لغت‌نامه دهخدا",
     "۳۱۲٬۵۰۶ مدخل پردازش و درج می‌شود؛ در صورت قطع‌شدن، از همان‌جا ادامه می‌دهیم.");
   clearPanel();
@@ -773,13 +850,34 @@ async function renderDictionary() {
     err.appendChild(el("p", null, esc(res.error_fa || "")));
     $panelBody.appendChild(err);
     $panelActions.append(
-      button("تلاش مجدد (ادامه از آخرین نقطه)", "btn-primary", renderDictionary),
+      button("تلاش مجدد (ادامه از آخرین نقطه)", "btn-primary", renderDictionaryClassic),
       button("انصراف", "btn-ghost", cancelWizard)
     );
     setStatus("err", "آماده‌سازی متوقف شد");
     return;
   }
-  S.ingestStats = res.data || {};
+  dictionaryDoneCard(res.data || {}, false);
+}
+
+function dictionaryDoneCard(data, restored) {
+  clearPanel();
+  const c = el("div", "wcard");
+  c.appendChild(el("h3", null,
+    restored ? "ایندکس آماده بازیابی شد." : "لغت‌نامه دهخدا آماده است."));
+  const modeFa = {
+    restored: "بازیابی ایندکس همراه بسته",
+    rebuilt_from_bundle: "ساخت مجدد از داده‌های همراه بسته",
+    downloaded: "دانلود و پردازش داده‌ها",
+  }[data.mode] || "";
+  const n = data.record_count || data.chunks || 0;
+  const ul = el("ul", "model-meta");
+  ul.innerHTML = `
+    <li>روش آماده‌سازی: <b>${esc(modeFa)}</b></li>
+    <li>تعداد بخش‌های برداری: <b>${faNum(n)}</b> — با pins.json تأیید شد</li>
+    <li>زمان: ${faEta(Math.round((data.duration_ms || 0) / 1000))}</li>`;
+  c.appendChild(ul);
+  $panelBody.appendChild(c);
+  S.ingestStats = data;
   markStep(6, "done");
   setStatus("on", "لغت‌نامه آماده است");
   renderReady();

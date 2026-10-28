@@ -263,6 +263,26 @@ def health() -> dict[str, Any]:
         "collection": state.settings.collection_name if state.settings else None,
         "exact_index_ready": state.exact_index_ready,
     }
+    # v1.3.1: engine readiness + model source in the spec's vocabulary —
+    # the offline acceptance asserts engine=ready AND source=bundled for
+    # the full variant (a "downloaded" source in the full variant is a
+    # release-blocking defect).
+    model_source = "unknown"
+    index_state = "unknown"
+    try:
+        from bootstrap import index_restore as _ir
+        from bootstrap import state as boot_state
+
+        model_source = str((boot_state.load().get("model") or {}).get("source")
+                           or "unknown")
+        index_state = _ir.index_state()
+    except Exception:
+        pass
+    info["source"] = model_source
+    info["model_source"] = model_source
+    info["index"] = index_state
+    degraded = info["status"] != "ok" or state.engine_error is not None
+    info["engine"] = "degraded" if degraded else "ready"
     if state.engine_error is not None:
         # NEVER a bare generic failure: full traceback + exact missing libs
         info["engine_error"] = state.engine_error
@@ -274,8 +294,10 @@ def health() -> dict[str, Any]:
         except Exception as exc:
             info["backend"] = {"error": str(exc)}
             info["status"] = "degraded"
+            info["engine"] = "degraded"
     elif state.engine_error is None:
         info["status"] = "degraded"
+        info["engine"] = "degraded"
     return info
 
 

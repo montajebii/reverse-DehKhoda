@@ -405,6 +405,21 @@ def _net_kind(net_err: str) -> str:
     return "download"
 
 
+def _is_network_blocked(exc: BaseException) -> bool:
+    """True when the exception chain contains net_guard.NetworkAttemptError
+    (the full variant's socket guard)."""
+    from .net_guard import NetworkAttemptError
+
+    seen: set[int] = set()
+    cur: Optional[BaseException] = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, NetworkAttemptError):
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
+
+
 def step_ingest(args) -> None:
     """آماده‌سازی لغت‌نامه دهخدا — v1.3.1: one step, three behaviors.
 
@@ -415,6 +430,7 @@ def step_ingest(args) -> None:
     Every branch emits the explicit dataset event {step:"dataset", mode:…}.
     """
     from . import index_restore
+    from .net_guard import NETWORK_BLOCKED_FA
 
     em = Emitter("dictionary")
     apply_env_from_state()
@@ -424,8 +440,12 @@ def step_ingest(args) -> None:
         em.result(True, data=result)
     except Exception as exc:
         _log_exception(em, exc)
-        em.result(False, error_code="ingest_failed",
-                  error_fa="آماده‌سازی لغت‌نامه ناموفق بود؛ نگران نباشید — از آخرین نقطهٔ پیشرفت ادامه می‌دهیم.")
+        if _is_network_blocked(exc):
+            em.result(False, error_code="network_blocked",
+                      error_fa=NETWORK_BLOCKED_FA)
+        else:
+            em.result(False, error_code="ingest_failed",
+                      error_fa="آماده‌سازی لغت‌نامه ناموفق بود؛ نگران نباشید — از آخرین نقطهٔ پیشرفت ادامه می‌دهیم.")
 
 
 def step_health(args) -> None:
@@ -515,13 +535,23 @@ def step_index(args) -> None:
     elif args.bundle_index:
         force = "restored"
     try:
+        # --rebuild-index is a deliberate FULL rebuild (future model upgrades
+        # may change the vector dim) — recreate the collection instead of
+        # resuming checkpoints against a possibly incompatible one
+        recreate = args.recreate or bool(args.rebuild_index)
         result = index_restore.ensure_index(em, force_mode=force,
-                                            recreate=args.recreate)
+                                            recreate=recreate)
         em.result(True, data=result)
     except Exception as exc:
         _log_exception(em, exc)
-        em.result(False, error_code="index_step_failed",
-                  error_fa="عملیات ایندکس ناموفق بود؛ جزئیات در «جزئیات فنی» آمده است.")
+        from .net_guard import NETWORK_BLOCKED_FA
+
+        if _is_network_blocked(exc):
+            em.result(False, error_code="network_blocked",
+                      error_fa=NETWORK_BLOCKED_FA)
+        else:
+            em.result(False, error_code="index_step_failed",
+                      error_fa="عملیات ایندکس ناموفق بود؛ جزئیات در «جزئیات فنی» آمده است.")
         sys.exit(1)
 
 

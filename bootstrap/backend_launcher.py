@@ -733,8 +733,10 @@ def launch(em: Emitter, preferred: Optional[str] = None,
 
         # v1.3.1: automatic index restore on the non-wizard path (HTTP
         # sidecar boot). The wizard defers to its dictionary step so the
-        # restore progress is visible in the right panel.
-        if not defer_index_restore:
+        # restore progress is visible in the right panel. Test C sets
+        # DEHKHODA_SKIP_AUTO_RESTORE=1 (it deliberately rebuilds instead).
+        if not defer_index_restore and \
+                os.environ.get("DEHKHODA_SKIP_AUTO_RESTORE", "") != "1":
             try:
                 from . import index_restore
 
