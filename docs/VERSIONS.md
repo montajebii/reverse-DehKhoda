@@ -44,6 +44,32 @@ paths. Pairs with `docker-compose.yml`, `backend/requirements*.txt`,
 | Rows verified | **312,507** (ids 1…312507, contiguous) |
 | Dump format | phpMyAdmin 4.7.7 / MariaDB 10.1.30, `utf8mb4_persian_ci`, table `words(id, word, meaning)` |
 
+## v1.3.1 — prebuilt Qdrant index pin (`prebuilt_index`) + zero-network full variant
+
+No engine/UI/dataset pin changes — new pin section `bootstrap/pins.json →
+prebuilt_index`, filled by the CI `build-index-snapshot` job and verified
+on every later run (any mismatch FAILS the build):
+
+| Field | Value / source |
+|---|---|
+| `qdrant_version` | `v1.20.0` — MUST equal the bundled `qdrant.version` pin (a new qdrant binary without a regenerated snapshot is a spec violation) |
+| `embedding_model_revision` | `d128750597153bb5987e10b1c3493a34e5a4502a` — equals `embedding_model.revision` |
+| `dataset_commit_sha` | `185ed68bc6ad7c4244c5f4cc1c9968aa8aefa0f4` — equals `dehkhoda_dataset.commit` |
+| `format` | `qdrant_snapshot` (server-format tar, shipped gzip-compressed) |
+| `collection_name` | `dehkhoda` |
+| `dense_dim` / `distance` | `768` / `Cosine` |
+| `sparse_metric` | `IP` |
+| `record_count` | points in the snapshot collection (staging integrity is separate: 312,506 usable rows asserted during the snapshot build) |
+| `snapshot_sha256` / `snapshot_size_bytes` | filled by the first successful CI run; later runs verify byte-for-byte |
+| `built_at` | ISO date of the snapshot build |
+
+Related v1.3.1 pins/decisions: the dataset URL in
+`app/ingestion/dehkhoda_loader.py` is pinned to the SAME immutable commit
+(was the moving `master` ref); the full variant ships
+`_internal/bundle.json` (`{variant, model, dataset, index}`) as the
+zero-network guard's source of truth; `index.ready` (data dir) mirrors the
+pin for the <2 s ready fast path and staleness detection.
+
 ## v1.3.0 — release variants (full / lean) + pinned model downloader
 
 No engine/UI/dataset changes (scope: packaging + model-download UX only).

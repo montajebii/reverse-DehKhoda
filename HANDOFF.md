@@ -1,8 +1,126 @@
-# HANDOFF — v1.3.0 real-desktop testing
+# HANDOFF — v1.3.1 (truly-offline full variant) + v1.3.0 real-desktop testing
+
+## 0. What changed in v1.3.1 (read this first)
+
+The **full** variant now bundles the model + the 33 gzipped SQL dumps + a
+**prebuilt Qdrant snapshot**, and makes **ZERO outbound network requests
+after the user downloads the artifact** — not on first launch, not on any
+launch, not during index restore, not during search, not on any error path.
+The CI acceptance observes **exactly 0 tcpdump packets** (not "almost 0",
+not "only DNS" — 0) in clean `--network none` containers on four distros.
+The **lean** variant is unchanged (first-run download of model + dataset,
+resumable; kept so the ingestion path stays CI-tested).
+
+* The full variant's user persona **never touches the network again**.
+* Future model/vector-config changes rebuild the index fully offline from
+  the bundled SQL (`--rebuild-index`) — that is the entire point of
+  bundling the raw dumps (v1.3.1 spec, non-negotiable).
+* Enforcement layers + audit table: `docs/NETWORK-AUDIT.md`.
+* Wizard repair + support: `dehkhoda-server bootstrap --step index
+  --diagnostics` produces a single `.zip` (OS, glibc, engine chain log,
+  qdrant log, backend log, last state, /health JSON, one sample search,
+  pins metadata, `index.ready`) — this replaces the "paste this" blocks
+  below for v1.3.1 installs (kept for v1.3.0 troubleshooting).
+
+### Full offline test (manual, Windows or any real desktop)
+
+Linux CI already asserts this automatically (Test A on ubuntu:24.04,
+debian:12, fedora, arch — `bootstrap/tests/full_offline_acceptance.sh`).
+Manual reproduction on a real machine:
+
+```bash
+# 1. disconnect completely
+nmcli networking off          # or unplug the cable / disable Wi-Fi
+# 2. run the full AppImage and complete the wizard
+./Dehkhoda.RAG_<v>_x86_64-full.AppImage
+# 3. in a root shell, capture EVERYTHING that is not loopback:
+sudo tcpdump -i any -nn 'not host 127.0.0.1 and not host ::1' -w /tmp/pcap
+#    ... run the whole wizard + one search, then Ctrl-C and read it:
+tcpdump -r /tmp/pcap | wc -l        # expectation: EXACTLY 0
+tcpdump -r /tmp/pcap 'udp port 53' | wc -l   # DNS: EXACTLY 0
+# 4. verify the install
+<sidecar> bootstrap --step index --verify-index   # exit 0
+curl -s http://127.0.0.1:<port>/health            # "engine":"ready","source":"bundled"
+```
+
+Platform-specific caveats (outside our control, documented per spec):
+
+* **Windows SmartScreen/WER**: the app itself makes zero requests, but
+  Windows Error Reporting / SmartScreen checks for an unsigned binary are
+  OS-level traffic we cannot suppress — they are NOT the app phoning home.
+* **WebView2** must already be present (pre-installed on Win10/11). If it
+  is missing, the app fails with a clear message rather than downloading
+  it; Tauri's WebView2 bootstrapper download is not triggered by us.
+* **Manual Windows tcpdump procedure** (deviation ACCEPTED in the v1.3.1
+  spec review): install Wireshark/tshark, or use the built-in `pktmon`
+  with this exact sequence:
+
+  ```text
+  pktmon start --capture --pkt-size 0 -f C:\pktmon.etl
+  ... run the app ...
+  pktmon stop
+  pktmon etl2txt C:\pktmon.etl
+  ```
+
+  Then filter `not ip.addr == 127.0.0.1` in the txt output, run the
+  wizard, and expect 0 non-loopback packets.
+
+### Rebuild index offline (future model / vector-config changes)
+
+```bash
+dehkhoda-server bootstrap --step index --rebuild-index
+# uses ONLY the bundled SQL (no network); recomputes chunks + BM25 stats +
+# vectors with the CURRENT model/config; verifies record_count against the
+# pin; writes a fresh index.ready. CI Test C proves this path on 4 distros
+# with --network none (0 packets).
+dehkhoda-server bootstrap --step index --verify-index   # metadata + live count
+```
+
+Constraints (spec PART 4): the snapshot pin (qdrant_version, model
+revision, dataset sha) is checked on every start — any drift marks the
+index `stale` and triggers an explicit rebuild-or-download decision, never
+a silent mismatch. Never ship a new qdrant binary without regenerating the
+snapshot in the same release.
+
+### CI fixes applied during v1.3.1
+
+| Commit | Fix |
+|---|---|
+| `dee8667` | zero-network closure: HF offline env + `local_files_only`, socket guard with the Persian fail-safe, dataset URL pinned to the immutable commit (was unpinned `master`), @font-face for the bundled Vazirmatn, NETWORK-AUDIT.md |
+| `fdd5dff` | prebuilt snapshot restore + offline rebuild + `build-index-snapshot` CI job (production ingestion once per release, pin verify-or-define) + size gates + published-asset parity check |
+| `a0fa00f` | three-behavior wizard dictionary step + Test A/Test C offline acceptance (tcpdump == 0 on 4 distros) + `/health engine/source` contract |
+
+*(fill further rows as CI runs; every fix lands with its real commit sha
+and a one-line reason — same rule as v1.3.0.)*
+
+### Known limitations in v1.3.1
+
+1. **Windows full-offline tcpdump verification is manual** (no Windows
+   containers in CI); the snapshot-restore path itself IS machine-verified
+   by the windows runner restore gate, and Linux Test A is automated.
+2. Test C runs the rebuild with the **hash embedder** to keep CI inside
+   the 6-hour job limit (deviation ACCEPTED in the v1.3.1 spec review).
+   Test C's purpose is to prove the offline rebuild works, which is
+   embedder-independent — chunking/record counts do not depend on the
+   embedder. Real-e5 rebuild quality is validated by the snapshot job
+   itself AND by a manual full-offline test on Arch.
+3. The `build-index-snapshot` job runs the full 312k-row e5 ingestion on a
+   CI runner (hours, once per pins change) — expected, cached, and the
+   reason the pin commit must land BEFORE the release tag.
+4. v1.3.0 limitations 2–7 remain where still applicable (unsigned Windows
+   binaries, `x86_64` asset naming, red non-gating `ci` workflow).
+
+---
+
+# HANDOFF — v1.3.0 real-desktop testing (historical)
 
 Released: tag `v1.3.0` → commit `b302beb` (see «CI fixes applied» — your local
 `81d2134` build predates 5 release-blocking fixes).
 Release page: https://github.com/montajebii/reverse-DehKhoda/releases/tag/v1.3.0
+
+> v1.3.0 note: limitation 1 below (dataset not bundled in either variant)
+> is FIXED for the full variant in v1.3.1 — lean keeps the first-run
+> dataset download by design.
 
 ## 1. Direct downloads
 

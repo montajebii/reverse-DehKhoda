@@ -291,7 +291,8 @@ def step_model(args) -> None:
         state.mark_step("model")
         if not bad:
             model_download.mark_ready("bundled")
-        em.result(True, data={"status": "bundled", "dir": str(bundled),
+        em.result(True, data={"status": "bundled", "source": "bundled",
+                              "dir": str(bundled),
                               "verified": not bad,
                               "revision": model_download.revision(),
                               "message_fa": "مدل زبانی همراه بسته نصب شد."})

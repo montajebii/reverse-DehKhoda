@@ -47,22 +47,38 @@ the end user.
 
 ---
 
-## 1b. Release variants — full vs lean (v1.3.0)
+## 1b. Release variants — full vs lean (v1.3.1)
 
 Both variants are built from the SAME codebase and behave identically
 (same wizard, same Qdrant engine chain, same UI, same logs); they differ in
-exactly one build flag — `DEHKHODA_BUNDLE_MODEL=1` — which decides whether
-the pinned embedding model ships inside the package.
+three build flags:
 
-| | **full (آفلاین)** | **lean (سبک)** |
+* `DEHKHODA_BUNDLE_MODEL=1` — bundle the pinned embedding model (v1.3.0);
+* `DEHKHODA_BUNDLE_DATASET=1` — bundle the 33 pinned gzipped SQL dumps (v1.3.1);
+* `DEHKHODA_BUNDLE_INDEX=1` — bundle the prebuilt Qdrant snapshot (v1.3.1).
+
+**Full = all three flags set. Lean = none.** The staged `_internal/bundle.json`
+manifest is the runtime source of truth: it drives the zero-network guard
+(`bootstrap/net_guard.py`) and the index-restore branches.
+
+### Variant comparison (v1.3.1)
+
+| | **full (کاملاً آفلاین)** | **lean (سبک)** |
 |---|---|---|
-| Embedding model | **bundled** inside the package (`_internal/models/<revision>/`) | **not bundled** — downloaded on first run |
-| Internet after download | **never** (zero network requests, verified by a `--network none` CI test) | only the one-time model download; everything else offline |
-| Download size | ≈ full package (model adds ~1.1 GB) | ≈ 250–400 MB smaller |
-| First-run wizard model step | «مدل زبانی همراه بسته نصب شد.» — sha256 verified once against `pins.json` (warn-only, never blocks) | dedicated step: exact size, disk check (2× model size), HEAD reachability probe (5 s), progress bar with **file + speed + ETA**, **Cancel** (partials kept), **resume across restarts**, sha256 verify → `.ready` |
-| Best for | offline machines, metered/unreliable networks, fleet installs | smaller download, machines with decent connectivity |
-| Linux artifact | `Dehkhoda.RAG_<v>_amd64-full.AppImage`, `Dehkhoda RAG_<v>_amd64.deb` | `Dehkhoda.RAG_<v>_amd64-lean.AppImage` |
+| What's inside | model + 33 gzipped SQL dumps + prebuilt Qdrant snapshot | none of the three |
+| Download size (target) | 2.2–3.2 GB AppImage / 1.8–2.8 GB exe | 450–650 MB AppImage / 400–550 MB exe |
+| Network requirement | **ZERO outbound requests after the download — forever.** Not on first launch, not on any launch, not during restore/search/error paths; the runtime socket guard hard-fails any attempt and tcpdump asserts exactly 0 packets in CI | requires internet ONLY for the first-run model + dataset download; afterwards fully offline |
+| First-run time | **< 60 s** (snapshot restore + one query; CI allows 120 s on slow filesystems) | model download (~1.1 GB, resumable) + ingestion of 312,506 entries |
+| First-run wizard step | «بازیابی ایندکس آماده» — staged restore with progress; **no download URLs exist in this UI**; record count verified against the pin | download progress (file + speed + ETA + Cancel) then resumable ingestion |
+| Future index rebuilds (new model / vector config) | fully offline via `--rebuild-index` (the raw SQL ships inside) | possible after the first-run download (dumps live in the data dir) |
+| Best for | offline machines, air-gapped fleets, unreliable networks | smaller download, machines with good connectivity |
+| Linux artifact | `Dehkhoda.RAG_<v>_x86_64-full.AppImage` (+ `.deb`, `.pkg.tar.zst`) | `Dehkhoda.RAG_<v>_x86_64-lean.AppImage` |
 | Windows artifact | `dehkhoda-setup-win-<v>-full.exe` | `dehkhoda-setup-win-<v>-lean.exe` |
+
+The dataset (~51 MB gzipped) is **not** bundled in lean — the v1.3.0
+first-run download behavior is preserved unchanged for lean, which keeps
+the ingestion code path exercised in CI and leaves a ready path for future
+dataset additions.
 
 ### The pinned model (both variants use the identical pin)
 
@@ -85,26 +101,79 @@ subsequent runs skip the whole model step in **< 100 ms** (no hashing).
 * `model-cache` job: downloads the pinned revision once per `pins.json`
   change, verifies **every file's sha256**, packs `model-e5.tar.gz`
   (layout `models/<revision>/…`), caches + uploads it as an artifact.
-* Acceptance runs the packaged AppImage in 4 distro containers
-  (ubuntu:24.04, debian:12, fedora, archlinux) × both variants with
-  `--network none`: full proves the **bundled** model verifies + a real e5
-  dense hybrid probe works offline; lean proves the **pre-seeded** data-dir
-  model is accepted offline (CI never depends on live HuggingFace here).
+* `build-index-snapshot` job (v1.3.1): runs the **EXACT production
+  ingestion pipeline** once per release (db → model → ingest from source,
+  the same bootstrap code path the wizard drives) against the pinned
+  qdrant binary, asserts staging rows == 312,506 and the collection count,
+  snapshots the collection, gzips it, sha256-verifies (or DEFINES) the
+  `pins.prebuilt_index` pin, and uploads the snapshot + the 33 dumps as
+  artifacts. Cached by `pins.json` — rebuilt only when a pin changes.
+  All platform builds depend on this job; the snapshot is generated ONCE
+  per release and shared by Linux and Windows.
+* Acceptance: Test A (`bootstrap/tests/full_offline_acceptance.sh`) runs
+  the packaged FULL AppImage in 4 distro containers (ubuntu:24.04,
+  debian:12, fedora, archlinux) with `--network none` and asserts
+  **exactly 0 tcpdump packets + 0 DNS lookups**, restore < 120 s,
+  `record_count == pin`, `--verify-index` OK, `/health engine=ready
+  source=bundled`, and zero external URLs in the UI bundle. Test C does
+  the same for `--rebuild-index` offline from the bundled SQL. Lean keeps
+  the v1.3.0 seeded-model acceptance (Test B).
+* Windows: the snapshot-restore path is exercised by a build gate on the
+  windows runner (`--step index --bundle-index` + `--verify-index`),
+  proving the snapshot format is portable across Linux/Windows for a
+  matching qdrant version. Full offline tcpdump verification on Windows is
+  manual (see HANDOFF.md).
 * `SHA256SUMS.all` covers every released asset; `sha256sum -c SHA256SUMS.all`
-  verifies a download in one command.
+  verifies a download in one command; a post-publish parity check compares
+  every asset's filename + byte count on the release page (the v1.3.0
+  space-vs-dot defect cannot recur); size gates fail the release if lean
+  > 700 MB, full < 2.0 GB or full > 3.5 GB.
+
+### Prebuilt index + zero-network guarantee (v1.3.1)
+
+* The full variant makes **zero outbound network requests** after download.
+  Enforcement layers (docs/NETWORK-AUDIT.md): build-time bundle manifest →
+  Rust shell sets `DEHKHODA_NO_NETWORK=1` + the six HF offline switches →
+  Python entrypoints activate `net_guard` → `SentenceTransformer(...,
+  local_files_only=True)` → a socket guard raises
+  `NetworkAttemptError` («این نسخه نباید به اینترنت متصل شود…») on ANY
+  non-loopback connect/DNS → CI tcpdump asserts 0 packets on 4 distros.
+* The snapshot restores into the NATIVE qdrant sidecar (server mode) —
+  qdrant-client local mode has no snapshot API, so the full variant's
+  engine chain tries `qdrant_native` first. Any restore failure logs the
+  exact error and falls through to a rebuild from the bundled SQL — never
+  silently, always with an explicit `{step: "dataset"}` event.
+* `data_dir/index.ready` stores `{qdrant_version, model_revision,
+  dataset_sha, record_count, snapshot_sha256}`; subsequent starts reach
+  ready in < 2 s via this marker alone. `--verify-index` fails (exit 1) on
+  any metadata mismatch.
+
+### Index maintenance CLI (v1.3.1)
+
+```bash
+dehkhoda-server bootstrap --step index --bundle-index    # force restore from the bundled snapshot
+dehkhoda-server bootstrap --step index --bundle-dataset  # force rebuild from the bundled SQL
+dehkhoda-server bootstrap --step index --rebuild-index   # ignore the snapshot, FULL rebuild (future model upgrades)
+dehkhoda-server bootstrap --step index --verify-index    # metadata + live count; exit 0/1
+dehkhoda-server bootstrap --step index --diagnostics     # single support .zip (replaces the paste-this blocks)
+```
+The flags also work without `--step index` (the step is inferred).
 
 ### Building a specific variant locally
 
 ```bash
-# both variants (needs the verified model tarball for full)
+# both variants (needs the verified model tarball + snapshot + dumps for full)
 python3 scripts/fetch_pinned_model.py --dest model-e5 --tar model-e5.tar.gz
+python3 scripts/fetch_pinned_dumps.py --dest dumps --tar dumps.tar.gz
 DEHKHODA_VARIANTS="full lean" DEHKHODA_MODEL_TARBALL="$PWD/model-e5.tar.gz" \
+  DEHKHODA_DATASET_TARBALL="$PWD/dumps.tar.gz" \
+  DEHKHODA_INDEX_SNAPSHOT="$PWD/dehkhoda.snapshot.gz" \
   bash installer/linux/appimage.sh
-# → dist-linux/Dehkhoda.RAG_<v>_amd64-{full,lean}.AppImage (+ .deb from full)
+# → dist-linux/Dehkhoda.RAG_<v>_x86_64-{full,lean}.AppImage (+ .deb from full)
+# (the snapshot comes from the CI build-index-snapshot job artifact; a local
+#  full build without it fails the build loudly by design)
 
-# full only, fetching the model straight from the pinned revision
-DEHKHODA_VARIANTS="full" bash installer/linux/appimage.sh
-# lean only (no model anywhere in the pipeline)
+# lean only (no model/dataset/snapshot anywhere in the pipeline)
 DEHKHODA_VARIANTS="lean" bash installer/linux/appimage.sh
 ```
 
@@ -213,8 +282,13 @@ optional advanced mode.
 ### Modes
 | Mode | What runs | When |
 |---|---|---|
-| `local` (chain step b) | `qdrant-client` embedded persistence — pure Python, zero extra processes | default; also tests/dev |
-| `server` (chain step c) | the **bundled** Qdrant native binary (no Docker), started by the launcher on a random localhost port | fallback when local mode cannot init |
+| `local` (chain step b) | `qdrant-client` embedded persistence — pure Python, zero extra processes | used ONLY for the lean variant, and only as its fallback; also tests/dev |
+| `server` (chain step c) | the **bundled** Qdrant native binary (no Docker), started by the launcher on a random localhost port | REQUIRED for the full variant — snapshot restore needs the native sidecar's snapshot API; also the lean fallback when local mode cannot init |
+
+The **full variant requires the native qdrant sidecar** (server mode):
+`qdrant-client` local mode has no snapshot API, so the bundled prebuilt
+snapshot can only be restored through the real engine. Local mode is used
+only for the lean variant, and only as a fallback.
 
 The desktop shell resolves the bundled sidecar via
 `tauri.conf.json → bundle.externalBin` and passes it to the engine chain as
