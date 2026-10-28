@@ -176,6 +176,22 @@ jobs:
           # no /dev/fuse anywhere on CI — extract-and-run sidesteps FUSE for
           # the AppImage-based bundler tools (linuxdeploy, appimagetool)
           APPIMAGE_EXTRACT_AND_RUN: "1"
+      - name: Normalize .deb filename (space -> dot, GitHub asset rule)
+        run: |
+          # tauri deb = "${productName}_${version}_${arch}.deb" and the
+          # productName is "Dehkhoda RAG" — with a SPACE. GitHub release
+          # assets may not contain spaces: on upload the asset becomes
+          # "Dehkhoda.RAG_...deb" while SHA256SUMS.all (hashed from the
+          # on-disk name) keeps the space -> sha256sum -c on the release
+          # page fails (v1.3.0 release-page defect). Rename BEFORE any
+          # hashing so disk name == asset name everywhere. arch.sh parses
+          # the version with cut -d_ -f2, which is unaffected.
+          cd dist-linux
+          for f in Dehkhoda\ RAG_*.deb; do
+            [ -e "$f" ] || continue
+            mv -v "$f" "${f// /.}"
+          done
+          ls -la *.deb
       - name: "Build gate: engine smoke — default chain (qdrant local)"
         run: |
           BIN=backend/dist/dehkhoda-server/dehkhoda-server
