@@ -146,13 +146,34 @@ jobs:
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
+      # Cache key = the INPUTS that determine snapshot bytes (dataset commit
+      # + model revision + ingestion-code revision), NOT hashFiles(pins.json):
+      # the pin-fill commit rewrites pins.json, and a pins-derived key would
+      # MISS the cache on the very next run — forcing a second 6h rebuild
+      # whose snapshot sha256 then fails the strict re-verify (snapshot tar
+      # bytes are not deterministic). Bump the r<N> literal ONLY when the
+      # ingestion code changes without a dataset/model pin change.
+      - name: Compute snapshot cache key
+        id: snapkey
+        run: |
+          python3 - <<'PY'
+          import json, os
+          p = json.load(open("bootstrap/pins.json"))
+          key = ("index-snapshot-v1.3.1-r1-"
+                 + p["dehkhoda_dataset"]["commit"] + "-"
+                 + p["embedding_model"]["revision"])
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write("skey=" + key + "\n")
+          print("snapshot cache key:", key)
+          PY
       - uses: actions/cache@v4
         id: snap-cache
         with:
           path: |
             dehkhoda.snapshot.gz
             prebuilt_index_meta.json
-          key: index-snapshot-v1-${{ hashFiles('bootstrap/pins.json') }}
+          key: ${{ steps.snapkey.outputs.skey }}
+          restore-keys: ${{ steps.snapkey.outputs.skey }}
       - name: Snapshot already cached -> verify bytes and re-upload
         if: steps.snap-cache.outputs.cache-hit == 'true'
         run: |
@@ -267,8 +288,18 @@ jobs:
           tail -1 db.jsonl
           # ingest step: THE production ingestion (312,506 rows -> chunks ->
           # e5 dense + BM25 sparse -> qdrant). This is the long step.
-          python3 backend/scripts/entry.py bootstrap --step ingest > ingest.jsonl 2> ingest.err \
-            || { echo 'ingest step FAILED:'; cat ingest.err; tail -5 ingest.jsonl; exit 1; }
+          # Run it in the background with a watchdog: every 10 min the last
+          # checkpoint event goes to the JOB LOG, so a timeout/infra kill
+          # always leaves progress evidence (attempt-2 lost everything).
+          python3 backend/scripts/entry.py bootstrap --step ingest > ingest.jsonl 2> ingest.err &
+          ING_PID=$!
+          for i in $(seq 1 34); do
+            sleep 600
+            kill -0 "$ING_PID" 2>/dev/null || break
+            LAST=$(tail -1 ingest.jsonl 2>/dev/null || true)
+            echo "[watchdog ${i}] pid=$ING_PID last_event: ${LAST:-<none yet>}"
+          done
+          wait "$ING_PID" || { echo 'ingest step FAILED:'; cat ingest.err; tail -5 ingest.jsonl; exit 1; }
           tail -1 ingest.jsonl | grep -q '"ok": *true' \
             || { echo 'ingest step not ok:'; tail -3 ingest.jsonl ingest.err; exit 1; }
           tail -1 ingest.jsonl

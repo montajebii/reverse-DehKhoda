@@ -87,7 +87,14 @@ class EmbeddingProvider:
                                               local_files_only=local_only)
         return self._model
 
-    def _encode(self, texts: list[str], prefix: str, batch_size: int = 32) -> list[list[float]]:
+    def _encode(self, texts: list[str], prefix: str,
+                batch_size: Optional[int] = None) -> list[list[float]]:
+        # DEHKHODA_EMBED_BATCH_SIZE wires the caller-side batch knob (the CI
+        # snapshot job sets 128): batch does not change the vectors, only
+        # throughput — at 32 the 312k-row ingestion cannot fit the 6h CI
+        # runner limit. Unset -> the historical 32.
+        if batch_size is None:
+            batch_size = max(8, int(os.environ.get("DEHKHODA_EMBED_BATCH_SIZE", "32")))
         model = self._ensure_model()
         vecs = model.encode(
             [prefix + t for t in texts],
@@ -100,7 +107,8 @@ class EmbeddingProvider:
     def embed_query(self, text: str) -> list[float]:
         return self._encode([text], self.query_prefix)[0]
 
-    def embed_documents(self, texts: list[str], batch_size: int = 32) -> list[list[float]]:
+    def embed_documents(self, texts: list[str],
+                        batch_size: Optional[int] = None) -> list[list[float]]:
         return self._encode(texts, self.doc_prefix, batch_size)
 
 
