@@ -85,6 +85,12 @@ jobs:
         run: python bootstrap/tests/test_state_env.py
       - name: "events ascii-safety (cp1252 UnicodeEncodeError on Windows pipes)"
         run: python bootstrap/tests/test_events_ascii.py
+      - name: "v1.3.1 zero-network guard (socket monkeypatch + offline env)"
+        run: python bootstrap/tests/test_net_guard.py
+      - name: "v1.3.1 pin/constant sync (dataset commit pin, HF env mirror)"
+        run: python bootstrap/tests/test_pins_sync.py
+      - name: "v1.3.1 offline model load with zero connect() (skips w/o weights)"
+        run: python bootstrap/tests/test_offline_guard.py
 
   # ================================================== Pinned model cache
   # ONE download of the pinned e5 revision per pins.json change; the tarball
@@ -119,6 +125,272 @@ jobs:
           path: model-e5.tar.gz
           retention-days: 14
 
+  # ================================================== Prebuilt index snapshot
+  # v1.3.1: the Qdrant snapshot is generated ONCE per release, BEFORE any
+  # platform build, with the EXACT production ingestion pipeline (the same
+  # bootstrap code path the wizard runs: db -> model -> ingest — no
+  # CI-only ingestion code). Cached across runs keyed by pins.json
+  # (qdrant_version + model revision + dataset commit all live there), so
+  # it rebuilds only when a pin changes.
+  #
+  # First run of a new pin set: pins.prebuilt_index.record_count /
+  # snapshot_sha256 are empty -> this job DEFINES them (meta artifact +
+  # job summary; the values get committed to pins.json in a small separate
+  # commit BEFORE the release tag). Any later run VERIFIES against the
+  # committed pin and FAILS THE BUILD on any mismatch — a truncated index
+  # silently returning fewer results is worse than no index at all.
+  build-index-snapshot:
+    name: prebuilt qdrant snapshot (production ingestion)
+    runs-on: ubuntu-latest
+    needs: [model-cache]
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        id: snap-cache
+        with:
+          path: |
+            dehkhoda.snapshot.gz
+            prebuilt_index_meta.json
+          key: index-snapshot-v1-${{ hashFiles('bootstrap/pins.json') }}
+      - name: Snapshot already cached -> verify bytes and re-upload
+        if: steps.snap-cache.outputs.cache-hit == 'true'
+        run: |
+          set -e
+          test -f dehkhoda.snapshot.gz && test -f prebuilt_index_meta.json
+          python3 - <<'PY'
+          import hashlib, json
+          pins = json.load(open("bootstrap/pins.json"))["prebuilt_index"]
+          h = hashlib.sha256(open("dehkhoda.snapshot.gz", "rb").read()).hexdigest()
+          meta = json.load(open("prebuilt_index_meta.json"))
+          print("cached snapshot sha256:", h, "size:", meta["snapshot_size_bytes"])
+          if pins.get("snapshot_sha256") and h != pins["snapshot_sha256"]:
+              raise SystemExit(f"cached snapshot does not match the pin: {h} != {pins['snapshot_sha256']}")
+          if h != meta["snapshot_sha256"]:
+              raise SystemExit("cached snapshot does not match its own meta")
+          print("cached snapshot verified OK")
+          PY
+      - uses: actions/upload-artifact@v4
+        if: steps.snap-cache.outputs.cache-hit == 'true'
+        with:
+          name: index-snapshot
+          path: |
+            dehkhoda.snapshot.gz
+            prebuilt_index_meta.json
+          retention-days: 14
+      - name: Fetch dumps + packs (cache-miss path only)
+        if: steps.snap-cache.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          python3 scripts/fetch_pinned_dumps.py --dest dh-dumps --tar dumps.tar.gz
+      - uses: actions/download-artifact@v4
+        if: steps.snap-cache.outputs.cache-hit != 'true'
+        with:
+          name: model-tarball
+          path: .
+      - name: Install Python deps (real embedder path)
+        if: steps.snap-cache.outputs.cache-hit != 'true'
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python3 -m pip install -r backend/requirements.txt
+      - name: Fetch + start pinned qdrant engine (localhost, production config)
+        if: steps.snap-cache.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          mkdir -p engine
+          python3 - <<'PY'
+          import shutil, sys, tarfile
+          from pathlib import Path
+          sys.path.insert(0, ".")
+          from bootstrap import model_fetcher
+          pins = model_fetcher.load_pins()["qdrant"]
+          f = pins["files"]["linux-x86_64"]
+          dest = Path("engine") / f["name"]
+          model_fetcher.download_file(f"{pins['base_url']}/{f['name']}", dest, sha256=f["sha256"])
+          with tarfile.open(dest) as tf:
+              tf.extractall("engine/x")
+          src = next(p for p in Path("engine/x").rglob("qdrant") if p.is_file())
+          shutil.move(str(src), "engine/qdrant")
+          Path("engine/qdrant").chmod(0o755)
+          print("qdrant engine ready:", pins["version"])
+          PY
+          mkdir -p engine-storage
+          QDRANT__SERVICE__HTTP_PORT=6333 QDRANT__SERVICE__HOST=127.0.0.1 \
+            QDRANT__STORAGE__STORAGE_PATH="$PWD/engine-storage" \
+            QDRANT__TELEMETRY_DISABLED=true \
+            nohup ./engine/qdrant > qdrant-snapshot.log 2>&1 &
+          for i in $(seq 1 120); do
+            curl -fsS http://127.0.0.1:6333/readyz >/dev/null 2>&1 && break
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:6333/readyz
+          echo "qdrant ${QDRANT_VERSION:-} ready on 127.0.0.1:6333"
+      - name: Seed model + state, run db + ingest (EXACT production path)
+        if: steps.snap-cache.outputs.cache-hit != 'true'
+        env:
+          DEHKHODA_DATA_DIR: "$PWD/dh-snapshot-data"
+          DEHKHODA_PREFER_NATIVE: "1"
+          OMP_NUM_THREADS: "4"
+          DEHKHODA_EMBED_BATCH_SIZE: "128"
+        run: |
+          set -e
+          mkdir -p "$DEHKHODA_DATA_DIR"
+          tar -xzf model-e5.tar.gz -C "$DEHKHODA_DATA_DIR"
+          cp -r dh-dumps "$DEHKHODA_DATA_DIR/dehkhoda_dumps"
+          python3 - <<'PY'
+          # seed ONLY what the wizard would have decided: model dir + ready
+          # marker + engine preference. Everything else is the real flow.
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, ".")
+          from bootstrap import model_download, paths, state
+          rev = model_download.revision()
+          tdir = paths.models_root() / rev
+          assert (tdir / "model.safetensors").exists(), "seed model missing"
+          model_download.ensure_model_ready("seeded")
+          st = state.load()
+          st["model"] = {"source": "seeded", "dir": str(tdir),
+                         "revision": rev, "verified": True}
+          state.save(st)
+          state.set_value("embedder", "e5-base")
+          state.set_value("backend", "qdrant_native")
+          print("state seeded:", rev)
+          PY
+          # db step: launch() with DEHKHODA_PREFER_NATIVE=1 reuses the live
+          # 6333 sidecar (server mode — snapshots REQUIRE the native engine;
+          # qdrant-client local mode does not support them).
+          python3 backend/scripts/entry.py bootstrap --step db > db.jsonl 2> db.err \
+            || { echo 'db step FAILED:'; cat db.err; tail -5 db.jsonl; exit 1; }
+          tail -1 db.jsonl | grep -q '"ok": *true' \
+            || { echo 'db step not ok:'; tail -3 db.jsonl db.err; exit 1; }
+          tail -1 db.jsonl
+          # ingest step: THE production ingestion (312,506 rows -> chunks ->
+          # e5 dense + BM25 sparse -> qdrant). This is the long step.
+          python3 backend/scripts/entry.py bootstrap --step ingest > ingest.jsonl 2> ingest.err \
+            || { echo 'ingest step FAILED:'; cat ingest.err; tail -5 ingest.jsonl; exit 1; }
+          tail -1 ingest.jsonl | grep -q '"ok": *true' \
+            || { echo 'ingest step not ok:'; tail -3 ingest.jsonl ingest.err; exit 1; }
+          tail -1 ingest.jsonl
+      - name: Assert staging integrity + collection record count
+        if: steps.snap-cache.outputs.cache-hit != 'true'
+        env:
+          DEHKHODA_DATA_DIR: "$PWD/dh-snapshot-data"
+        run: |
+          set -e
+          python3 - <<'PY'
+          import json, sqlite3, sys
+          from pathlib import Path
+          sys.path.insert(0, ".")
+          from bootstrap import dehkhoda_ingest, paths
+          from qdrant_client import QdrantClient
+
+          con = sqlite3.connect(paths.data_dir() / "dehkhoda_stage.db")
+          rows = con.execute("SELECT COUNT(*) FROM words").fetchone()[0]
+          con.close()
+          assert rows == dehkhoda_ingest.USABLE_ROWS, (
+              f"staging rows {rows} != pinned usable rows {dehkhoda_ingest.USABLE_ROWS}")
+          print(f"staging integrity: {rows} rows == pinned {dehkhoda_ingest.USABLE_ROWS}")
+
+          pins = json.load(open("bootstrap/pins.json"))["prebuilt_index"]
+          c = QdrantClient(url="http://127.0.0.1:6333", timeout=60.0)
+          info = c.get_collection(pins["collection_name"])
+          count = c.count(pins["collection_name"], exact=True).count
+          print(f"collection {pins['collection_name']}: {count} points")
+          assert count > 0, "empty collection"
+          if pins.get("record_count"):
+              assert count == pins["record_count"], (
+                  f"record_count {count} != pin {pins['record_count']} — "
+                  "dataset or vector config drifted; do NOT ship this snapshot")
+              print("record_count matches the committed pin")
+          else:
+              print(f"PIN-FILL: record_count={count} (first run — commit into pins.json)")
+          c.close()
+          Path("RECORD_COUNT.txt").write_text(str(count))
+          PY
+      - name: Create snapshot, gzip, sha256, verify-or-define pin
+        if: steps.snap-cache.outputs.cache-hit != 'true'
+        env:
+          DEHKHODA_DATA_DIR: "$PWD/dh-snapshot-data"
+        run: |
+          set -e
+          python3 - <<'PY'
+          import gzip, hashlib, json, shutil, sys, time, urllib.request
+          from datetime import datetime, timezone
+          from pathlib import Path
+          sys.path.insert(0, ".")
+          from qdrant_client import QdrantClient
+
+          pins = json.load(open("bootstrap/pins.json"))["prebuilt_index"]
+          c = QdrantClient(url="http://127.0.0.1:6333", timeout=120.0)
+          t0 = time.time()
+          snap = c.create_snapshot(pins["collection_name"], wait=True)
+          name = snap.name
+          print(f"snapshot created: {name} in {time.time()-t0:.1f}s")
+          c.close()
+
+          raw = Path("dehkhoda.snapshot")
+          url = f"http://127.0.0.1:6333/collections/{pins['collection_name']}/snapshots/{name}"
+          with urllib.request.urlopen(url, timeout=600) as r, open(raw, "wb") as f:
+              shutil.copyfileobj(r, f)
+          print(f"downloaded {raw.stat().st_size} bytes")
+
+          gz = Path("dehkhoda.snapshot.gz")
+          with open(raw, "rb") as src, gzip.GzipFile(fileobj=open(gz, "wb"), compresslevel=9) as dst:
+              shutil.copyfileobj(src, dst)
+          raw.unlink()
+          sha = hashlib.sha256(gz.read_bytes()).hexdigest()
+          count = int(Path("RECORD_COUNT.txt").read_text())
+          meta = {
+              "qdrant_version": pins["qdrant_version"],
+              "model_revision": pins["embedding_model_revision"],
+              "dataset_commit_sha": pins["dataset_commit_sha"],
+              "collection_name": pins["collection_name"],
+              "dense_dim": pins["dense_dim"],
+              "distance": pins["distance"],
+              "sparse_metric": pins["sparse_metric"],
+              "record_count": count,
+              "snapshot_sha256": sha,
+              "snapshot_size_bytes": gz.stat().st_size,
+              "built_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+          }
+          Path("prebuilt_index_meta.json").write_text(json.dumps(meta, indent=1))
+          print(json.dumps(meta, indent=1))
+
+          pin = json.load(open("bootstrap/pins.json"))["prebuilt_index"]
+          if pin.get("snapshot_sha256"):
+              assert sha == pin["snapshot_sha256"], (
+                  f"snapshot sha256 {sha} != pin {pin['snapshot_sha256']}")
+              assert gz.stat().st_size == pin.get("snapshot_size_bytes",
+                                                  gz.stat().st_size), "size drift"
+              print("snapshot verified against the committed pin")
+          else:
+              print("PIN-FILL: snapshot_sha256=" + sha)
+              print("PIN-FILL: snapshot_size_bytes=" + str(gz.stat().st_size))
+              print("PIN-FILL: built_at=" + meta["built_at"])
+          PY
+          rm -f dehkhoda.snapshot
+      - name: Pack dumps artifact + upload snapshot artifacts
+        if: steps.snap-cache.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          ls -la dehkhoda.snapshot.gz prebuilt_index_meta.json dumps.tar.gz
+          cat prebuilt_index_meta.json
+      - uses: actions/upload-artifact@v4
+        if: steps.snap-cache.outputs.cache-hit != 'true'
+        with:
+          name: index-snapshot
+          path: |
+            dehkhoda.snapshot.gz
+            prebuilt_index_meta.json
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        if: steps.snap-cache.outputs.cache-hit != 'true'
+        with:
+          name: dumps-gz
+          path: dumps.tar.gz
+          retention-days: 14
+
   # ================================================== Linux packages
   # Built INSIDE a debian:12 container so the bundled binaries link against
   # glibc 2.36 — the oldest of our supported targets (Debian 12, Ubuntu
@@ -132,7 +404,7 @@ jobs:
   build-linux:
     name: packages (linux, debian-12 container)
     runs-on: ubuntu-latest
-    needs: [model-cache]
+    needs: [model-cache, build-index-snapshot]
     container:
       image: python:3.12-slim-bookworm
     steps:
@@ -162,6 +434,14 @@ jobs:
         with:
           name: model-tarball
           path: .
+      - uses: actions/download-artifact@v4
+        with:
+          name: index-snapshot
+          path: .
+      - uses: actions/download-artifact@v4
+        with:
+          name: dumps-gz
+          path: .
       - name: Install Python deps (PyInstaller + backend)
         run: |
           python -m pip install --upgrade pip
@@ -173,6 +453,9 @@ jobs:
           DEHKHODA_BUNDLE_PROFILE: full
           DEHKHODA_VARIANTS: "full lean"
           DEHKHODA_MODEL_TARBALL: "$PWD/model-e5.tar.gz"
+          # v1.3.1: dataset + prebuilt index bundle (full variant only)
+          DEHKHODA_DATASET_TARBALL: "$PWD/dumps.tar.gz"
+          DEHKHODA_INDEX_SNAPSHOT: "$PWD/dehkhoda.snapshot.gz"
           # no /dev/fuse anywhere on CI — extract-and-run sidesteps FUSE for
           # the AppImage-based bundler tools (linuxdeploy, appimagetool)
           APPIMAGE_EXTRACT_AND_RUN: "1"
@@ -239,11 +522,18 @@ jobs:
   # variants (4 distros x full/lean = 8 jobs). Each container is started with
   # `--network none` AFTER its image was pulled — every assertion therefore
   # holds with ZERO network access:
-  #   full: engine chain + bundled qdrant + BUNDLED model verify + real e5
-  #         dense hybrid probe (the "no network requests for the model" test)
+  #   full: v1.3.1 Test A — tcpdump observes EXACTLY 0 non-loopback packets
+  #         (and 0 DNS packets), the bundled snapshot restores in <90s, the
+  #         record count matches the pin, one real Persian hybrid search
+  #         returns a plausible headword, /health reports source=bundled,
+  #         and the extracted UI bundle contains no external URLs.
+  #         PLUS Test C — --rebuild-index offline from the bundled SQL.
   #   lean: model pre-seeded into the data dir from the CI tarball, then the
-  #         same engine + model assertions — proving a seeded lean install is
-  #         accepted offline and CI never touches live HuggingFace here.
+  #         v1.3.0 engine + model assertions (Test B infrastructure).
+  # tcpdump is NOT preinstalled in the distro images and the acceptance run
+  # has no network — so for FULL jobs we derive a committed image with
+  # tcpdump installed while the network is still up (docker commit), then
+  # run the acceptance itself with --network none from that image.
   linux-acceptance:
     name: appimage-acceptance (${{ matrix.variant }}, ${{ matrix.image }})
     needs: [build-linux, model-cache]
@@ -277,21 +567,44 @@ jobs:
           '
       - name: Pull image (network ON — the acceptance run itself is offline)
         run: docker pull ${{ matrix.image }}
-      - name: "Acceptance (network NONE): ${{ matrix.variant }} on ${{ matrix.image }}"
+      - name: Prepare tcpdump-capable image (full variant only, network ON)
+        if: matrix.variant == 'full'
         run: |
-          if [ "${{ matrix.variant }}" = "lean" ]; then
-            # seed args: the tarball mounts read-only at /model-e5.tar.gz and
-            # appimage_acceptance.sh extracts it into DEHKHODA_DATA_DIR.
-            docker run --rm --network none \
-              -v "$PWD":/repo -v "$PWD/model-e5.tar.gz":/model-e5.tar.gz:ro \
-              -e DEHKHODA_MODEL_TARBALL=/model-e5.tar.gz \
-              ${{ matrix.image }} \
-              bash /repo/bootstrap/tests/appimage_acceptance.sh /repo
-          else
-            docker run --rm --network none -v "$PWD":/repo \
-              ${{ matrix.image }} \
-              bash /repo/bootstrap/tests/appimage_acceptance.sh /repo
-          fi
+          set -e
+          case '${{ matrix.image }}' in
+            ubuntu:*|debian:*)  PKG="apt-get update -qq && apt-get install -y -qq tcpdump" ;;
+            fedora:*)           PKG="dnf install -y -q tcpdump" ;;
+            archlinux:*)        PKG="pacman -Sy --noconfirm --needed tcpdump" ;;
+            *) echo "unknown distro"; exit 1 ;;
+          esac
+          docker run --name dh-tcpdump-prep ${{ matrix.image }} bash -c "$PKG >/dev/null 2>&1 && tcpdump --version | head -1"
+          docker commit dh-tcpdump-prep dh-acc:${{ matrix.variant }}-$(echo '${{ matrix.image }}' | tr ':.' '--')
+          docker rm dh-tcpdump-prep
+      - name: "Test A — full offline acceptance (network NONE, tcpdump == 0 packets): ${{ matrix.image }}"
+        if: matrix.variant == 'full'
+        run: |
+          IMG=dh-acc:$(echo '${{ matrix.image }}' | tr ':.' '--')
+          docker run --rm --network none -v "$PWD":/repo \
+            $IMG \
+            bash /repo/bootstrap/tests/full_offline_acceptance.sh /repo
+      - name: "Test C — rebuild index offline from bundled SQL (network NONE): ${{ matrix.image }}"
+        if: matrix.variant == 'full'
+        run: |
+          IMG=dh-acc:$(echo '${{ matrix.image }}' | tr ':.' '--')
+          docker run --rm --network none -v "$PWD":/repo \
+            -e DEHKHODA_EMBEDDER=hash -e DEHKHODA_DENSE_DIM=256 \
+            $IMG \
+            bash /repo/bootstrap/tests/full_offline_acceptance.sh /repo --test-c
+      - name: "Acceptance (network NONE): lean on ${{ matrix.image }}"
+        if: matrix.variant == 'lean'
+        run: |
+          # seed args: the tarball mounts read-only at /model-e5.tar.gz and
+          # appimage_acceptance.sh extracts it into DEHKHODA_DATA_DIR.
+          docker run --rm --network none \
+            -v "$PWD":/repo -v "$PWD/model-e5.tar.gz":/model-e5.tar.gz:ro \
+            -e DEHKHODA_MODEL_TARBALL=/model-e5.tar.gz \
+            ${{ matrix.image }} \
+            bash /repo/bootstrap/tests/appimage_acceptance.sh /repo
       - name: SHA256 checksums (incl. arch package)
         if: matrix.image == 'archlinux:base-devel' && matrix.variant == 'full'
         run: |
@@ -316,7 +629,7 @@ jobs:
   build-windows:
     name: installer (windows, full + lean)
     runs-on: windows-latest
-    needs: [model-cache]
+    needs: [model-cache, build-index-snapshot]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -329,6 +642,14 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: model-tarball
+          path: .
+      - uses: actions/download-artifact@v4
+        with:
+          name: index-snapshot
+          path: .
+      - uses: actions/download-artifact@v4
+        with:
+          name: dumps-gz
           path: .
       - name: Build sidecar (full profile)
         shell: bash
@@ -366,6 +687,12 @@ jobs:
           mkdir -p desktop/src-tauri/resources/dehkhoda-server
           rm -rf desktop/src-tauri/resources/dehkhoda-server/*
           cp -r backend/dist/dehkhoda-server/. desktop/src-tauri/resources/dehkhoda-server/
+          # v1.3.1: explicit LEAN manifest — the zero-network guard and the
+          # index-restore branches read _internal/bundle.json
+          mkdir -p desktop/src-tauri/resources/dehkhoda-server/_internal
+          printf '{"variant":"lean","model":false,"dataset":false,"index":false}\n' \
+            > desktop/src-tauri/resources/dehkhoda-server/_internal/bundle.json
+          cat desktop/src-tauri/resources/dehkhoda-server/_internal/bundle.json
           # v1.2.1 built the GUI here; the v1.3.0 split dropped it and NSIS
           # prelude died on Resolve-Path (no dehkhoda-rag.exe). Build once —
           # the exe is variant-agnostic (NSIS packages resources from disk).
@@ -397,18 +724,38 @@ jobs:
             -DQDRANT_DIR="$PWD/desktop/src-tauri/resources/sidecars/qdrant" `
             -DVERSION="${{ env.VERSION }}" -DSUFFIX="-lean" `
             installer/windows/nsis.nsi
-      - name: Stage model into _internal (FULL content)
+      - name: Stage FULL content into _internal (model + dataset + snapshot)
         shell: bash
         run: |
+          set -e
           REV=$(python -c "import json;print(json.load(open('bootstrap/pins.json'))['embedding_model']['revision'])")
+          SHA_PIN=$(python -c "import json;print(json.load(open('bootstrap/pins.json'))['prebuilt_index']['snapshot_sha256'])")
+          test -n "$SHA_PIN" || { echo 'FATAL: pins.prebuilt_index.snapshot_sha256 empty — CI snapshot job must run first'; exit 1; }
           mkdir -p desktop/src-tauri/resources/dehkhoda-server/_internal
           tar -xzf model-e5.tar.gz -C desktop/src-tauri/resources/dehkhoda-server/_internal
           test -f "desktop/src-tauri/resources/dehkhoda-server/_internal/models/$REV/model.safetensors"
           echo "staged bundled model (revision $REV)"
+          # v1.3.1: dataset (33 pinned dumps) + prebuilt snapshot + manifest
+          tar -xzf dumps.tar.gz -C desktop/src-tauri/resources/dehkhoda-server/_internal
+          N=$(find desktop/src-tauri/resources/dehkhoda-server/_internal/dumps -name '*.sql.gz' | wc -l)
+          test "$N" = "33" || { echo "FATAL: expected 33 dumps, found $N"; exit 1; }
+          mkdir -p desktop/src-tauri/resources/dehkhoda-server/_internal/index
+          cp dehkhoda.snapshot.gz desktop/src-tauri/resources/dehkhoda-server/_internal/index/dehkhoda.snapshot.gz
+          ACTUAL=$(sha256sum desktop/src-tauri/resources/dehkhoda-server/_internal/index/dehkhoda.snapshot.gz | awk '{print $1}')
+          test "$ACTUAL" = "$SHA_PIN" || { echo "FATAL: snapshot sha mismatch: $ACTUAL != $SHA_PIN"; exit 1; }
+          printf '{"variant":"full","model":true,"dataset":true,"index":true}\n' \
+            > desktop/src-tauri/resources/dehkhoda-server/_internal/bundle.json
+          cat desktop/src-tauri/resources/dehkhoda-server/_internal/bundle.json
+          echo "staged dataset (33 dumps) + snapshot ($ACTUAL) + full manifest"
           # also stage into backend/dist so the build gates below exercise the
           # exact bytes that ship inside the full installer
           mkdir -p backend/dist/dehkhoda-server/_internal
           tar -xzf model-e5.tar.gz -C backend/dist/dehkhoda-server/_internal
+          tar -xzf dumps.tar.gz -C backend/dist/dehkhoda-server/_internal
+          mkdir -p backend/dist/dehkhoda-server/_internal/index
+          cp dehkhoda.snapshot.gz backend/dist/dehkhoda-server/_internal/index/dehkhoda.snapshot.gz
+          printf '{"variant":"full","model":true,"dataset":true,"index":true}\n' \
+            > backend/dist/dehkhoda-server/_internal/bundle.json
       - name: "Build gate: bundled model verify + real e5 dense probe (full bytes)"
         shell: bash
         run: |
@@ -423,6 +770,31 @@ jobs:
             || { echo 'engine-smoke dense gate FAILED:'; cat gate-dense.err; exit 1; }
           tail -1 gate-dense.json | grep -q '"ok": *true' \
             || { echo 'engine-smoke dense gate not ok:'; cat gate-dense.json gate-dense.err; exit 1; }
+      - name: "Build gate: offline guard unit tests (zero-network closure)"
+        shell: bash
+        run: |
+          export PYTHONUTF8=1 PYTHONIOENCODING=utf-8
+          python bootstrap/tests/test_net_guard.py
+          python bootstrap/tests/test_pins_sync.py
+          python bootstrap/tests/test_offline_guard.py
+      - name: "Build gate: SNAPSHOT RESTORE on Windows (cross-platform portability)"
+        shell: bash
+        run: |
+          BIN=backend/dist/dehkhoda-server/dehkhoda-server.exe
+          export DEHKHODA_DATA_DIR="$PWD/.dh-restore"
+          export PYTHONUTF8=1 PYTHONIOENCODING=utf-8
+          export DEHKHODA_QDRANT_BINARY="$PWD/desktop/src-tauri/resources/sidecars/qdrant/qdrant.exe"
+          "$BIN" bootstrap --step index --bundle-index >gate-restore.json 2>gate-restore.err \
+            || { echo 'index --bundle-index gate FAILED:'; cat gate-restore.err; exit 1; }
+          tail -1 gate-restore.json | grep -q '"ok": *true' \
+            || { echo 'restore gate not ok:'; cat gate-restore.json gate-restore.err; exit 1; }
+          tail -1 gate-restore.json
+          tail -1 gate-restore.json | grep -q '"mode": *"restored"' \
+            || { echo 'restore gate: dataset event mode != restored'; exit 1; }
+          "$BIN" bootstrap --step index --verify-index >gate-verify.json 2>gate-verify.err \
+            || { echo 'verify-index gate FAILED:'; cat gate-verify.err; exit 1; }
+          tail -1 gate-verify.json | grep -q '"ok": *true' \
+            || { echo 'verify-index gate not ok:'; cat gate-verify.json gate-verify.err; exit 1; }
       - name: Compile NSIS installer (FULL)
         shell: pwsh
         run: |
@@ -477,8 +849,8 @@ jobs:
   # ================================================== GitHub Release
   release:
     name: github-release (4 variants + SHA256SUMS.all)
-    needs: [container-tests, windows-bootstrap, model-cache, build-linux,
-            linux-acceptance, build-windows]
+    needs: [container-tests, windows-bootstrap, model-cache, build-index-snapshot,
+            build-linux, linux-acceptance, build-windows]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
@@ -512,6 +884,22 @@ jobs:
             ./dehkhoda-setup-win-*-lean.exe \
             > SHA256SUMS.all
           cat SHA256SUMS.all
+      - name: "v1.3.1 size gates (fail loudly on bundle mistakes)"
+        run: |
+          python3 - <<'PY'
+          import glob, os, sys
+          MB = 1_000_000
+          lean_mb = os.path.getsize(glob.glob("rel/Dehkhoda.RAG_*-lean.AppImage")[0]) // MB
+          full_mb = os.path.getsize(glob.glob("rel/Dehkhoda.RAG_*-full.AppImage")[0]) // MB
+          print(f"lean.AppImage = {lean_mb} MB, full.AppImage = {full_mb} MB")
+          if lean_mb > 700:
+              sys.exit(f"SIZE GATE FAIL: lean grew to {lean_mb} MB — model or index leaked into lean")
+          if full_mb < 2000:
+              sys.exit(f"SIZE GATE FAIL: full is only {full_mb} MB — model, SQL dumps or snapshot missing")
+          if full_mb > 3500:
+              sys.exit(f"SIZE GATE FAIL: full is {full_mb} MB — double-bundled (check gzip + that the snapshot is stored compressed)")
+          print("size gates OK")
+          PY
       - name: Compose Persian release description with real sizes
         run: |
           FULL_APPIMAGE=$(ls rel/Dehkhoda.RAG_*-full.AppImage | head -1)
@@ -520,13 +908,17 @@ jobs:
           LEAN_MB=$(( $(stat -c%s "$LEAN_APPIMAGE") / 1000000 ))
           MODEL_MB=$(python3 -c "import json;print(json.load(open('bootstrap/pins.json'))['embedding_model']['total_size_bytes']//1000000)")
           REVISION=$(python3 -c "import json;print(json.load(open('bootstrap/pins.json'))['embedding_model']['revision'])")
+          RECORDS=$(python3 -c "import json;print(f\"{json.load(open('bootstrap/pins.json'))['prebuilt_index']['record_count']:,}\")")
           cat > RELEASE_BODY.md <<EOF
           دو نسخه از همین برنامه منتشر شده است — هر دو از یک کد، با یک پرچم ساخت:
 
-          ## نسخهٔ کامل (آفلاین) — شامل مدل زبانی، حدود ${FULL_MB} مگابایت
+          ## نسخهٔ کامل (کاملاً آفلاین) — شامل مدل، داده‌ها و ایندکس آماده؛ حدود ${FULL_MB} مگابایت
           * فایل‌ها: \`Dehkhoda.RAG_*-full.AppImage\` (لینوکس)، \`dehkhoda-setup-win-*-full.exe\` (ویندوز)
-          * مدل زبانی داخل بسته است؛ پس از دانلود، **هیچ اتصال اینترنتی لازم نیست**
-          * مدل: multilingual-e5-base — آثار انگشت همهٔ فایل‌ها با pins.json تأیید می‌شود (revision \`${REVISION}\`)
+          * مدل زبانی + ۳۳ فایل دادهٔ دهخدا + ایندکس آمادهٔ Qdrant داخل بسته است
+          * پس از دانلود، **هیچ اتصال اینترنتی لازم نیست — حتی یک بستهٔ شبکه هم ارسال نمی‌شود**
+          * اولین اجرا با بازیابی ایندکس آماده در کمتر از یک دقیقه به «آماده» می‌رسد
+          * ایندکس: ${RECORDS} بردار؛ مدل: multilingual-e5-base (revision \`${REVISION}\`)
+          * برای تغییر مدل یا تنظیمات برداری در آینده، داده‌های خام SQL هم داخل بسته است (ساخت مجدد کاملاً آفلاین)
 
           ## نسخهٔ سبک (دانلود در اولین اجرا) — حدود ${LEAN_MB} مگابایت
           * فایل‌ها: \`Dehkhoda.RAG_*-lean.AppImage\` (لینوکس)، \`dehkhoda-setup-win-*-lean.exe\` (ویندوز)
@@ -556,3 +948,49 @@ jobs:
             rel/*.exe
             rel/SHA256SUMS.all
           generate_release_notes: true
+      - name: "v1.3.1 published-asset parity check (name + byte count on the release page)"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          # The v1.3.0 space-vs-dot defect must not recur: open EVERY asset
+          # URL GitHub lists for this tag, compare (a) the exact filename and
+          # (b) the byte count with the local rel/ files, and verify every
+          # SHA256SUMS.all line references a name that actually exists.
+          TAG="v${{ env.VERSION }}"
+          API="https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG"
+          curl -fsS -H "Authorization: Bearer $GH_TOKEN" "$API" > release.json
+          python3 - <<'PY'
+          import json, os, sys, urllib.request
+          rel = json.load(open("release.json"))
+          assets = {a["name"]: a["size"] for a in rel["assets"]}
+          local = {}
+          for f in os.listdir("rel"):
+              local[f] = os.path.getsize(os.path.join("rel", f))
+          local.pop("release.json", None)
+          fails = []
+          # 1. every local file that SHOULD be published exists on the page
+          for name, size in local.items():
+              if name == "SHA256SUMS.txt":   # windows-only intermediate sums
+                  continue
+              if name not in assets:
+                  fails.append(f"missing on release page: {name}")
+              elif assets[name] != size:
+                  fails.append(f"size mismatch on release page: {name} "
+                               f"(local {size} != published {assets[name]})")
+          # 2. every SHA256SUMS.all line references a published filename
+          for line in open("rel/SHA256SUMS.all"):
+              name = line.split(maxsplit=1)[-1].strip()
+              if name not in assets:
+                  fails.append(f"SHA256SUMS.all references unpublished file: {name}")
+          # 3. HEAD-check each asset URL actually serves the bytes
+          for a in rel["assets"]:
+              req = urllib.request.Request(a["browser_download_url"], method="HEAD")
+              with urllib.request.urlopen(req, timeout=60) as r:
+                  cl = int(r.headers.get("Content-Length", -1))
+              if cl != a["size"]:
+                  fails.append(f"HEAD byte count mismatch: {a['name']} ({cl} != {a['size']})")
+          if fails:
+              sys.exit("PARITY FAIL:\n" + "\n".join(fails))
+          print(f"parity OK: {len(assets)} published assets match local bytes")
+          PY

@@ -159,7 +159,9 @@ def step_db(args) -> None:
     em = Emitter("db")
     apply_env_from_state()
     try:
-        data = backend_launcher.launch(em)
+        # defer_index_restore=True: the wizard's dictionary step owns the
+        # restore progress UI (db step only brings the engine up)
+        data = backend_launcher.launch(em, defer_index_restore=True)
         state.mark_step("database")
         em.result(True, data=data)
     except backend_launcher.EngineUnavailable as exc:
@@ -404,14 +406,22 @@ def _net_kind(net_err: str) -> str:
 
 
 def step_ingest(args) -> None:
-    from . import dehkhoda_ingest
+    """آماده‌سازی لغت‌نامه دهخدا — v1.3.1: one step, three behaviors.
+
+    full (bundled snapshot):  restore (target <60s) — any failure falls
+                              through to rebuild-from-bundle, NEVER silently
+    full (bundled dumps only): rebuild from the bundled SQL (checkpointed)
+    lean:                     the existing resumable download + ingest path
+    Every branch emits the explicit dataset event {step:"dataset", mode:…}.
+    """
+    from . import index_restore
 
     em = Emitter("dictionary")
     apply_env_from_state()
     try:
-        stats = dehkhoda_ingest.run(em, recreate=args.recreate)
+        result = index_restore.ensure_index(em, recreate=args.recreate)
         state.mark_step("dictionary")
-        em.result(True, data=stats)
+        em.result(True, data=result)
     except Exception as exc:
         _log_exception(em, exc)
         em.result(False, error_code="ingest_failed",
@@ -461,6 +471,137 @@ def step_selftest(args) -> None:
     })
 
 
+def step_index(args) -> None:
+    """v1.3.1 index maintenance step (offline; requires the full variant).
+
+    Modes (flags on --step index):
+      (none)            ensure_index per the bundle manifest (auto branch)
+      --bundle-index    force restore from the bundled snapshot on first run
+      --bundle-dataset  force rebuild from the bundled SQL on first run
+      --verify-index    verify index.ready + metadata + record_count; exit 0/1
+      --rebuild-index   ignore the bundled snapshot, rebuild from the
+                        bundled SQL (future model upgrades; requires the
+                        dataset bundle)
+      --diagnostics     single .zip with OS/glibc info, engine chain log,
+                        qdrant log, backend log, last wizard state,
+                        /health JSON, one sample hybrid search result,
+                        pins metadata and index.ready contents
+    """
+    from . import index_restore
+
+    em = Emitter("index")
+    apply_env_from_state()
+
+    if args.verify_index:
+        ok, detail = index_restore.verify_index(live=True)
+        em.result(ok, data=detail,
+                  error_code="" if ok else "index_not_ready",
+                  error_fa=("ایندکس آماده نیست یا با نسخهٔ pinned مطابقت ندارد."
+                            if not ok else ""))
+        if not ok:
+            sys.exit(1)
+        return
+
+    if args.diagnostics:
+        path = _diagnostics_zip(em)
+        em.result(True, data={"diagnostics": str(path)})
+        return
+
+    force = None
+    if args.rebuild_index:
+        force = "rebuilt_from_bundle"
+    elif args.bundle_dataset:
+        force = "rebuilt_from_bundle"
+    elif args.bundle_index:
+        force = "restored"
+    try:
+        result = index_restore.ensure_index(em, force_mode=force,
+                                            recreate=args.recreate)
+        em.result(True, data=result)
+    except Exception as exc:
+        _log_exception(em, exc)
+        em.result(False, error_code="index_step_failed",
+                  error_fa="عملیات ایندکس ناموفق بود؛ جزئیات در «جزئیات فنی» آمده است.")
+        sys.exit(1)
+
+
+def _diagnostics_zip(em: Emitter) -> Path:
+    """Everything support needs, in one archive (replaces the HANDOFF
+    'paste this' blocks)."""
+    import io
+    import platform
+    import zipfile
+
+    out = paths.data_dir() / "dehkhoda-diagnostics.zip"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        info: dict[str, object] = {
+            "platform": platform.platform(),
+            "python": platform.python_version(),
+            "glibc": "",
+            "bundle": paths.bundled_manifest(),
+            "index_state": index_restore.index_state(),
+        }
+        try:
+            import ctypes
+
+            libc = ctypes.CDLL("libc.so.6")
+            buf2 = ctypes.create_string_buffer(128)
+            libc.gnu_get_libc_version(buf2, 128)
+            info["glibc"] = buf2.value.decode()  # type: ignore[union-attr]
+        except Exception:
+            pass
+        z.writestr("system.json", json.dumps(info, ensure_ascii=False, indent=1))
+        try:
+            z.writestr("setup-state.json", paths.state_path().read_text("utf-8"))
+        except OSError:
+            pass
+        try:
+            z.writestr("index.ready", paths.index_ready_path().read_text("utf-8"))
+        except OSError:
+            pass
+        for name in ("backend.log", "qdrant.log", "wizard.log"):
+            p = paths.data_dir() / "logs" / name
+            if p.exists():
+                z.write(p, f"logs/{name}")
+        try:
+            from .model_fetcher import load_pins
+
+            pins = load_pins()
+            pins["embedding_model"]["files"] = "<elided>"
+            z.writestr("pins-metadata.json", json.dumps(
+                {k: pins[k] for k in ("prebuilt_index", "embedding_model")
+                 if k in pins}, ensure_ascii=False, indent=1))
+        except Exception:
+            pass
+        # live /health + one sample hybrid search (best-effort, local only)
+        try:
+            import urllib.request as _ur
+
+            st = state.load()
+            url = (st.get("runtime") or {}).get("url") or "http://127.0.0.1:6333"
+            with _ur.urlopen(f"{url}/healthz", timeout=5) as r:
+                z.writestr("health.json", r.read().decode("utf-8", "replace"))
+        except Exception as exc:
+            z.writestr("health.json", f"unavailable: {exc!r}")
+        try:
+            import urllib.request as _ur
+
+            st = state.load()
+            url = (st.get("runtime") or {}).get("url") or ""
+            if url:
+                q = json.dumps({"query": "احساس بی‌قراری و اضطراب", "top_k": 3})
+                req = _ur.Request(f"{url}/search", data=q.encode(),
+                                  headers={"Content-Type": "application/json"})
+                with _ur.urlopen(req, timeout=30) as r:
+                    z.writestr("sample-search.json", r.read().decode("utf-8", "replace"))
+        except Exception as exc:
+            z.writestr("sample-search.json", f"unavailable: {exc!r}")
+    out.write_bytes(buf.getvalue())
+    em.progress(log=f"diagnostics written: {out}")
+    return out
+
+
 def _log_exception(em: Emitter, exc: Exception) -> None:
     import traceback
 
@@ -477,6 +618,7 @@ STEPS = {
     "engine-smoke": step_engine_smoke,
     "state": step_state,
     "selftest": step_selftest,
+    "index": step_index,
 }
 
 
@@ -492,7 +634,9 @@ def main(argv: list[str] | None = None) -> int:
         pass
 
     ap = argparse.ArgumentParser(prog="dehkhoda-server bootstrap")
-    ap.add_argument("--step", required=True, choices=sorted(STEPS))
+    ap.add_argument("--step", default=None, choices=sorted(STEPS),
+                    help="wizard step; inferred from the v1.3.1 index flags "
+                         "when omitted")
     ap.add_argument("--consent", type=int, default=None, choices=(0, 1))
     ap.add_argument("--skip", action="store_true")
     ap.add_argument("--recreate", action="store_true")
@@ -512,8 +656,32 @@ def main(argv: list[str] | None = None) -> int:
                          "(dense = real e5 model probe)")
     ap.add_argument("--preferred", default=None,
                     help="engine-smoke: start the chain at this engine")
+    # v1.3.1 index-step modes (--step index; --step inferred when omitted)
+    ap.add_argument("--bundle-index", action="store_true",
+                    help="index: force restore from the bundled snapshot")
+    ap.add_argument("--bundle-dataset", action="store_true",
+                    help="index: force rebuild from the bundled SQL")
+    ap.add_argument("--verify-index", action="store_true",
+                    help="index: verify index.ready + metadata + count "
+                         "(exit 0/1)")
+    ap.add_argument("--rebuild-index", action="store_true",
+                    help="index: ignore the bundled snapshot, rebuild from "
+                         "the bundled SQL (future model upgrades)")
+    ap.add_argument("--diagnostics", action="store_true",
+                    help="index: write dehkhoda-diagnostics.zip to the "
+                         "data dir")
     ap.add_argument("--set", dest="set", default=None)
     args = ap.parse_args(argv)
+
+    # v1.3.1: the index flags imply --step index
+    if args.step is None:
+        if args.bundle_index or args.bundle_dataset or args.verify_index \
+                or args.rebuild_index or args.diagnostics:
+            args.step = "index"
+        else:
+            ap.error("--step is required (or pass one of --bundle-index / "
+                     "--bundle-dataset / --verify-index / --rebuild-index / "
+                     "--diagnostics)")
 
     emit({"t": "hello", "step": args.step, "pid": os.getpid()})
     STEPS[args.step](args)

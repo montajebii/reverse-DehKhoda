@@ -161,6 +161,50 @@ if [ "${VARIANTS}" != "lean" ]; then
   rm -rf "${VERIFY_DIR}"
 fi
 
+# ------------------------------------------- 3b. stage dataset (full, v1.3.1)
+# The full variant bundles the 33 pinned gzipped SQL dumps so future index
+# rebuilds (new model, new vector config) work with zero network. Source
+# (first match wins):
+#   DEHKHODA_DATASET_TARBALL  dumps.tar.gz (CI artifact, layout dumps/*.sql.gz)
+#   DEHKHODA_DATASET_SRC      a dir with the 33 <name>.sql.gz files
+#   (none)                    download the pinned dumps now (CI fallback)
+DUMP_COUNT="$(python3 -c "import json;print(len(json.load(open('${ROOT}/bootstrap/pins.json'))['dehkhoda_dataset']['files']))")"
+DATASET_TARBALL=""
+if [ -n "${DEHKHODA_DATASET_TARBALL:-}" ] && [ -f "${DEHKHODA_DATASET_TARBALL}" ]; then
+  DATASET_TARBALL="${DEHKHODA_DATASET_TARBALL}"
+elif [ -n "${DEHKHODA_DATASET_SRC:-}" ] && [ -d "${DEHKHODA_DATASET_SRC}" ]; then
+  log "packing dataset tarball from DEHKHODA_DATASET_SRC=${DEHKHODA_DATASET_SRC}"
+  python3 "${ROOT}/scripts/fetch_pinned_dumps.py" --from-dir "${DEHKHODA_DATASET_SRC}" \
+    --tar "${OUT}/dumps.tar.gz"
+  DATASET_TARBALL="${OUT}/dumps.tar.gz"
+else
+  log "no dataset tarball provided — downloading the 33 pinned dumps (CI fallback)"
+  DUMP_DEST="${OUT}/dumps"
+  python3 "${ROOT}/scripts/fetch_pinned_dumps.py" --dest "${DUMP_DEST}" \
+    --tar "${OUT}/dumps.tar.gz"
+  DATASET_TARBALL="${OUT}/dumps.tar.gz"
+fi
+if [ "${VARIANTS}" != "lean" ]; then
+  VERIFY_DUMPS="$(mktemp -d)"
+  tar -xzf "${DATASET_TARBALL}" -C "${VERIFY_DUMPS}"
+  python3 "${ROOT}/scripts/fetch_pinned_dumps.py" --from-dir "${VERIFY_DUMPS}/dumps" >/dev/null
+  log "dataset tarball verified against pins.json (${DUMP_COUNT} dumps): ${DATASET_TARBALL}"
+  rm -rf "${VERIFY_DUMPS}"
+fi
+
+# --------------------------------------------- 3c. stage index snapshot (full)
+# The prebuilt Qdrant snapshot (generated ONCE per release by the CI
+# build-index-snapshot job with the EXACT production ingestion pipeline).
+# Spec guard: NEVER bundle a snapshot unless pins.prebuilt_index carries
+# the real sha256 — a truncated/absent pin must fail the build loudly.
+SNAPSHOT_SHA_PIN="$(python3 -c "import json;print(json.load(open('${ROOT}/bootstrap/pins.json'))['prebuilt_index']['snapshot_sha256'])")"
+SNAPSHOT_FILE=""
+if [ -n "${DEHKHODA_INDEX_SNAPSHOT:-}" ] && [ -f "${DEHKHODA_INDEX_SNAPSHOT}" ]; then
+  SNAPSHOT_FILE="${DEHKHODA_INDEX_SNAPSHOT}"
+elif [ -f "${OUT}/dehkhoda.snapshot.gz" ]; then
+  SNAPSHOT_FILE="${OUT}/dehkhoda.snapshot.gz"
+fi
+
 # ------------------------------------------------------- 4. tauri per variant
 cd "${ROOT}/desktop"
 npm install --no-fund --no-audit
@@ -185,8 +229,46 @@ for VARIANT in ${VARIANTS}; do
     mkdir -p "${RES}/dehkhoda-server/_internal/models"
     tar -xzf "${MODEL_TARBALL}" -C "${RES}/dehkhoda-server/_internal"
     log "model staged into _internal/models ($(du -sh "${RES}/dehkhoda-server/_internal/models" | cut -f1))"
+
+    # ---- v1.3.1: dataset (33 pinned .sql.gz) — required for the FULL variant
+    mkdir -p "${RES}/dehkhoda-server/_internal/dumps"
+    tar -xzf "${DATASET_TARBALL}" -C "${RES}/dehkhoda-server/_internal"
+    STAGED_DUMPS=$(find "${RES}/dehkhoda-server/_internal/dumps" -name '*.sql.gz' | wc -l)
+    [ "${STAGED_DUMPS}" = "${DUMP_COUNT}" ] || {
+      log "FATAL: expected ${DUMP_COUNT} staged dumps, found ${STAGED_DUMPS}"; exit 1; }
+    log "dataset staged into _internal/dumps (${STAGED_DUMPS} dumps)"
+
+    # ---- v1.3.1: prebuilt Qdrant snapshot — sha256-pinned, fail loudly
+    if [ -z "${SNAPSHOT_FILE}" ]; then
+      log "FATAL: full variant requires the prebuilt index snapshot (DEHKHODA_INDEX_SNAPSHOT or dist-linux/dehkhoda.snapshot.gz)"; exit 1
+    fi
+    [ -n "${SNAPSHOT_SHA_PIN}" ] || {
+      log "FATAL: pins.prebuilt_index.snapshot_sha256 is empty — the CI build-index-snapshot job must run first and the pin committed before a full release build"; exit 1; }
+    mkdir -p "${RES}/dehkhoda-server/_internal/index"
+    cp -f "${SNAPSHOT_FILE}" "${RES}/dehkhoda-server/_internal/index/dehkhoda.snapshot.gz"
+    ACTUAL_SHA=$(sha256sum "${RES}/dehkhoda-server/_internal/index/dehkhoda.snapshot.gz" | awk '{print $1}')
+    [ "${ACTUAL_SHA}" = "${SNAPSHOT_SHA_PIN}" ] || {
+      log "FATAL: snapshot sha256 mismatch — pinned=${SNAPSHOT_SHA_PIN} actual=${ACTUAL_SHA}"; exit 1; }
+    log "snapshot staged into _internal/index ($(wc -c < "${RES}/dehkhoda-server/_internal/index/dehkhoda.snapshot.gz") bytes, sha256 verified)"
+
+    # ---- v1.3.1: bundle manifest — the zero-network guard's source of truth
+    python3 - "${RES}/dehkhoda-server/_internal/bundle.json" <<'PYEOF'
+import json, sys
+json.dump({"variant": "full", "model": True, "dataset": True, "index": True},
+          open(sys.argv[1], "w"), indent=1)
+PYEOF
+    log "bundle manifest: {variant=full, model=1, dataset=1, index=1}"
     BUNDLES="${TAURI_BUNDLES:-appimage deb}"
   else
+    # lean: explicit all-false manifest — stale full staging can never leak
+    # into a lean build (the fresh rm -rf above already guarantees it; the
+    # manifest makes it auditable inside the artifact)
+    python3 - "${RES}/dehkhoda-server/_internal/bundle.json" <<'PYEOF'
+import json, sys
+json.dump({"variant": "lean", "model": False, "dataset": False, "index": False},
+          open(sys.argv[1], "w"), indent=1)
+PYEOF
+    log "bundle manifest: {variant=lean, model=0, dataset=0, index=0}"
     BUNDLES="${TAURI_BUNDLES_LEAN:-appimage}"
   fi
 

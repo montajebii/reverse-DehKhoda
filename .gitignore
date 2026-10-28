@@ -38,3 +38,6 @@ dist-linux/
 dist-win/
 .qdrant-initialized
 tool-results/
+
+# Qdrant sidecar runtime snapshots (dev runs; never ship)
+snapshots/

@@ -530,6 +530,11 @@ def launch_qdrant(em: Emitter, fetch_if_missing: bool = True) -> dict[str, Any]:
         "QDRANT__SERVICE__HTTP_PORT": str(port),
         "QDRANT__SERVICE__HOST": "127.0.0.1",
         "QDRANT__STORAGE__STORAGE_PATH": str(storage),
+        # v1.3.1: pin the snapshots dir to match
+        # index_restore._snapshots_dir() — qdrant >= 1.20 only accepts
+        # file:// snapshot recovery from inside its own snapshots dir, and
+        # the default (./snapshots, CWD-relative) is wrong for bundled apps
+        "QDRANT__STORAGE__SNAPSHOTS_PATH": str(storage / "snapshots"),
         # top-level key (NOT service.telemetry_disabled) — a local-first
         # desktop engine must not phone home.
         "QDRANT__TELEMETRY_DISABLED": "true",
@@ -660,7 +665,8 @@ _ENGINE_LAUNCHERS = {
 }
 
 
-def launch(em: Emitter, preferred: Optional[str] = None) -> dict[str, Any]:
+def launch(em: Emitter, preferred: Optional[str] = None,
+           defer_index_restore: bool = False) -> dict[str, Any]:
     """Launch the preferred vector engine, falling back down the chain.
 
     Records every failed attempt (with full traceback + missing library)
@@ -668,10 +674,35 @@ def launch(em: Emitter, preferred: Optional[str] = None) -> dict[str, Any]:
     preferred choice (state.backend — untouched) and the engine that
     actually came up (state.runtime.engine) so the HTTP sidecar can
     re-attach on later launches via ensure_runtime().
+
+    v1.3.1 full variant: when the bundle ships the prebuilt index (or
+    DEHKHODA_PREFER_NATIVE=1 / DEHKHODA_NO_NETWORK=1 is set), the chain
+    starts at qdrant_native — snapshot restore REQUIRES server mode and
+    qdrant-client local mode cannot host a restored snapshot. The rest of
+    the chain stays as fallback; a local-mode engine is still usable via
+    the explicit rebuild_from_bundled_sql path.
+
+    defer_index_restore=True (the wizard's db step) skips the automatic
+    restore so the dictionary step can show its own progress; the
+    HTTP-sidecar path (ensure_runtime) restores automatically.
     """
     st = state.load()
     pref = preferred or st.get("backend") or "qdrant_native"
     chain = CHAIN.get(pref) or CHAIN["qdrant_native"]
+
+    # v1.3.1: full variant (bundled snapshot) must try the native sidecar
+    # first — restore_bundled needs server mode.
+    prefer_native = (os.environ.get("DEHKHODA_PREFER_NATIVE") == "1"
+                     or os.environ.get("DEHKHODA_NO_NETWORK") == "1")
+    if not prefer_native:
+        try:
+            prefer_native = paths.bundled_snapshot() is not None
+        except Exception:
+            prefer_native = False
+    if prefer_native and chain[0] != "qdrant_native":
+        chain = ["qdrant_native"] + [e for e in chain if e != "qdrant_native"]
+        em.progress(log="full variant: trying the native qdrant sidecar first "
+                        "(snapshot restore requires server mode)")
 
     attempts: list[dict] = []
     for engine in chain:
@@ -699,6 +730,24 @@ def launch(em: Emitter, preferred: Optional[str] = None) -> dict[str, Any]:
         st = state.set_value("runtime", runtime)
         state.set_value("backend_active", engine)
         em.progress(task_fa=f"موتور جست‌وجو آماده است ({engine})")
+
+        # v1.3.1: automatic index restore on the non-wizard path (HTTP
+        # sidecar boot). The wizard defers to its dictionary step so the
+        # restore progress is visible in the right panel.
+        if not defer_index_restore:
+            try:
+                from . import index_restore
+
+                if index_restore.bundle_capabilities()["index"] and \
+                        index_restore.index_state() != "ready":
+                    em.progress(task_fa="بازیابی ایندکس آماده…", indet=True,
+                                log="launch(): bundled index present but not "
+                                    "ready — restoring")
+                    index_restore.ensure_index(em)
+            except Exception as exc:
+                # never-silent: surface the failure, keep the engine up (the
+                # dictionary step will retry/rebuild with full progress)
+                em.progress(log=f"launch(): index restore FAILED: {exc!r}")
         return runtime
 
     raise EngineUnavailable(attempts)
@@ -720,7 +769,18 @@ def ensure_runtime(em: Optional[Emitter] = None) -> dict[str, Any]:
     if engine == "qdrant_native":
         url = runtime.get("url", "")
         if url and http_get(f"{url}/readyz", 2.0) in (200, 204):
-            return runtime
+            # v1.3.1: the fast path (<2s to ready) requires BOTH a healthy
+            # engine AND a ready bundled index; a missing/stale index falls
+            # through to launch(), which restores it (never silently).
+            try:
+                from . import index_restore
+
+                caps = index_restore.bundle_capabilities()
+                if not (caps["index"]
+                        and index_restore.index_state() != "ready"):
+                    return runtime
+            except Exception:
+                return runtime
     elif engine == "milvus":
         if tcp_open(MILVUS_PORT):
             return runtime
