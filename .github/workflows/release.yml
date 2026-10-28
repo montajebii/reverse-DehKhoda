@@ -177,6 +177,7 @@ jobs:
           # the AppImage-based bundler tools (linuxdeploy, appimagetool)
           APPIMAGE_EXTRACT_AND_RUN: "1"
       - name: Normalize .deb filename (space -> dot, GitHub asset rule)
+        shell: bash   # ${var// /./} is bash-only; job default shell is sh/dash
         run: |
           # tauri deb = "${productName}_${version}_${arch}.deb" and the
           # productName is "Dehkhoda RAG" — with a SPACE. GitHub release
