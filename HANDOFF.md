@@ -141,6 +141,12 @@ are CI/packaging or crash-fixes; none change user-facing variant behavior
    654 MB AppImage) confirms the model is bundled in full and absent in lean.
 6. Persian JSONL events are ASCII-escaped on the wire (cp1252-safe since
    `c011bac`); the wizard UI renders them identically.
+7. The non-gating `ci` workflow (unit tests / PyInstaller / Tauri smoke) is
+   red at its `tauri` jobs: the build script expects
+   `resources/sidecars/qdrant/qdrant.gz`, which only the release workflow's
+   prep steps stage (`resource path ... doesn't exist`). v1.2.1 shipped with
+   `ci` red as well (it died earlier in the chain). Not release-gating;
+   v1.3.1 candidate.
 
 ## 8. v1.3.1 candidates (not implemented, by scope)
 
