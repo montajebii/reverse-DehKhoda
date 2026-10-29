@@ -103,13 +103,19 @@ class PersianAnalyzer:
 
     # -- engines ---------------------------------------------------------------
     def _init_hazm(self) -> None:
-        from hazm import Normalizer, stopwords_list, word_tokenize
+        # ONE WordTokenizer instance, bound method below. Do NOT use hazm's
+        # module-level word_tokenize(): it constructs WordTokenizer() per
+        # call, and each construction re-reads and re-parses the full
+        # words.dat — seconds per document. The 30k-doc BM25 fit alone then
+        # takes tens of hours (the v1.3.1 build-index-snapshot CI hang).
+        from hazm import Normalizer, WordTokenizer, stopwords_list
 
         self._hazm_norm = Normalizer()  # attribute, not closure: keeps pickling simple
+        self._hazm_tok = WordTokenizer()
         stops = set(stopwords_list())
         self._impl = "hazm"
         self._norm = self._norm_hazm
-        self._tok = word_tokenize
+        self._tok = self._hazm_tok.tokenize
         self._stop = stops
 
     def _init_parsivar(self) -> None:
