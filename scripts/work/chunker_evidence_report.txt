@@ -1,0 +1,40 @@
+sentences regex: r"(?<=[۔.؟!\n])\s*"
+rows: total=312507 used=312506 chunks=350829 (fixed-chunker chunk total=351156)
+rows with an oversize (>1200 char) chunk: 310
+chunks over 512 tokens (true count, prefix included): 630 of 350829
+token percentiles: {'p50': 79, 'p90': 366, 'p99': 471, 'p999': 542, 'max': 3953}
+char-buckets of >512-token chunks: {'<=1200': 377, '1201-2400': 193, '2401-4800': 52, '>4800': 8}
+
+== top oversize rows ==
+  id=7559 'ابوالفضل' clean=27498 chunks=15 max_chunk=13130 sentences=66 giant_len=12979 giant_first=False
+  id=276588 'پرویز' clean=34541 chunks=21 max_chunk=9079 sentences=32 giant_len=8928 giant_first=False
+  id=131890 'ذوقار' clean=25195 chunks=13 max_chunk=6704 sentences=33 giant_len=6554 giant_first=False
+  id=21174 'احمد' clean=18639 chunks=16 max_chunk=6078 sentences=148 giant_len=5927 giant_first=False
+  id=131558 'ذوالیمینین' clean=34196 chunks=29 max_chunk=5624 sentences=135 giant_len=5474 giant_first=False
+  id=24418 'ارثماطیقی' clean=31333 chunks=32 max_chunk=5508 sentences=102 giant_len=5357 giant_first=False
+  id=131513 'ذوالنون بن ابراهیم مصری' clean=33921 chunks=29 max_chunk=5256 sentences=71 giant_len=5105 giant_first=False
+  id=21222 'احمد' clean=34101 chunks=25 max_chunk=5062 sentences=45 giant_len=4911 giant_first=False
+  id=178070 'طواف' clean=9158 chunks=6 max_chunk=4361 sentences=50 giant_len=4210 giant_first=False
+  id=29938 'اسقیل' clean=8225 chunks=6 max_chunk=4044 sentences=54 giant_len=3894 giant_first=False
+  id=290063 'کاظم' clean=14398 chunks=13 max_chunk=3872 sentences=44 giant_len=3721 giant_first=False
+  id=20992 'احمد' clean=29095 chunks=26 max_chunk=3854 sentences=56 giant_len=3703 giant_first=False
+  id=66639 'تاج الدین' clean=19420 chunks=11 max_chunk=3803 sentences=20 giant_len=3652 giant_first=False
+  id=66949 'تارابی' clean=7746 chunks=6 max_chunk=3773 sentences=11 giant_len=3624 giant_first=False
+  id=295634 'کلا' clean=3633 chunks=3 max_chunk=3561 sentences=6 giant_len=3410 giant_first=False
+  id=10108 'ابوریحان' clean=32106 chunks=29 max_chunk=3461 sentences=121 giant_len=3310 giant_first=False
+  id=16053 'ابونصر' clean=8717 chunks=7 max_chunk=3415 sentences=12 giant_len=3264 giant_first=False
+  id=96740 'حروف' clean=4895 chunks=4 max_chunk=3313 sentences=65 giant_len=3162 giant_first=False
+  id=20750 'احمد' clean=10110 chunks=10 max_chunk=3160 sentences=44 giant_len=3009 giant_first=False
+  id=131421 'ذوالقرنین' clean=34102 chunks=34 max_chunk=3129 sentences=157 giant_len=2978 giant_first=False
+
+== longest definitions ==
+  id=18506 'احد' clean=34783 chunks=37 max_chunk=1200
+  id=85780 'جدل' clean=34602 chunks=36 max_chunk=1200
+  id=13583 'ابوعلی بن سینا' clean=34549 chunks=37 max_chunk=1200
+  id=276588 'پرویز' clean=34541 chunks=21 max_chunk=9079
+  id=20332 'احمد' clean=34488 chunks=41 max_chunk=1472
+  id=20613 'احمد' clean=34398 chunks=39 max_chunk=1655
+  id=20222 'احمد' clean=34396 chunks=40 max_chunk=1580
+  id=30354 'اسماعیل' clean=34329 chunks=38 max_chunk=2838
+  id=23098 'ادب' clean=34321 chunks=39 max_chunk=1468
+  id=131558 'ذوالیمینین' clean=34196 chunks=29 max_chunk=5624
