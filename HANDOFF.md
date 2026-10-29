@@ -274,3 +274,27 @@ are CI/packaging or crash-fixes; none change user-facing variant behavior
 - `paths-ignore` for doc-only pushes (harmless today: the release workflow is
   tag-triggered only).
 - Consider publishing per-variant SHA256SUMS alongside SHA256SUMS.all.
+
+## 9. v1.3.1 chunker truncation audit (2026-10-29, pre-pin gate)
+
+Full-corpus replay of the exact `chunk_definition` (extracted from the
+shipped source via AST, run over all 312,506 usable rows) against the
+pinned e5 tokenizer (`tokenizer.json` sha256-verified, `max_seq_length`
+512 from the pinned `sentence_bert_config.json`):
+
+* Buggy else-branch (no hard-split when a >1049-char sentence follows a
+  non-empty chunk): 310 rows emitted oversized chunks (max 13,130 chars),
+  630 of 350,829 chunks (0.180%) exceeded 512 tokens and were silently
+  truncated by sentence-transformers (vector = first ~510 tokens; no
+  exception, no log). Worst vector covered ~13% of its chunk text.
+* After the else-branch hard-split fix: 351,156 chunks, 384 (0.109%)
+  still exceed 512 tokens — ALL <=1200 chars, worst 845 tokens, caused by
+  vocalized Arabic harakat tokenizing as separate XLM-R tokens (down to
+  0.71 chars/token), which the char-based contract cannot bound.
+* Mitigation shipped: BM25 sparse + stored payload always cover the full
+  chunk text (lexical/RRF retrieval and displayed definitions are
+  complete); residual documented as `known_truncations: 384` in
+  `bootstrap/pins.json`. Token-aware chunking = v1.3.2.
+* Evidence scripts: `scripts/chunker_evidence.py`,
+  `scripts/chunker_followup.py`, `scripts/postfix_global.py`
+  (work dir `scripts/work/`).

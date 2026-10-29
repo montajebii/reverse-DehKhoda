@@ -276,6 +276,16 @@ class DehkhodaLoader:
                 chunks.append(cur)
                 tail = cur[-overlap:] if overlap > 0 else ""
                 cur = f"{tail} {sent}".strip()
+                # v1.3.1 regression fix: a sentence that does not fit after
+                # the overlap-tail can still leave cur oversized (a >1049-char
+                # sentence arriving while cur is non-empty). Without this
+                # hard-split the oversized cur was flushed as-is, producing
+                # chunks of up to ~13k chars whose e5 vector silently covered
+                # only the first 512 tokens. Mirrors the branch-1 loop, so
+                # EVERY emitted chunk is <= max_len chars.
+                while len(cur) > max_len:
+                    chunks.append(cur[:max_len])
+                    cur = cur[max_len - overlap :]
         if cur:
             chunks.append(cur)
         return chunks

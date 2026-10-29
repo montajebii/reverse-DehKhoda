@@ -159,7 +159,7 @@ jobs:
           python3 - <<'PY'
           import json, os
           p = json.load(open("bootstrap/pins.json"))
-          key = ("index-snapshot-v1.3.1-r1-"
+          key = ("index-snapshot-v1.3.1-r2-"
                  + p["dehkhoda_dataset"]["commit"] + "-"
                  + p["embedding_model"]["revision"])
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
