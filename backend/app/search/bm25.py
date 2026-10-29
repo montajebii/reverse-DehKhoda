@@ -66,16 +66,39 @@ class BM25Encoder:
         return len(docs)
 
     # -- encoding ----------------------------------------------------------------
+    @staticmethod
+    def _rows_to_dicts(m) -> list[dict[int, float]]:
+        """Extract per-row {dim: weight} dicts from a scipy CSR result WITHOUT
+        row indexing. v1.3.1 fix: pymilvus 2.6.x returns scipy sparse ARRAYS
+        (csr_array, ndim=2) — ``m[0]`` and even iteration hit "NotImplementedError:
+        We have not yet implemented 1D sparse slices" on scipy >= 1.8, crashing
+        every encode path. indptr slicing works on csr_matrix AND csr_array,
+        2-D (n, N) and 1-D (N,) alike."""
+        csr = m.tocsr() if hasattr(m, "tocsr") else m
+        indptr, indices, data = csr.indptr, csr.indices, csr.data
+        n_rows = csr.shape[0] if getattr(csr, "ndim", 1) == 2 else 1
+        out: list[dict[int, float]] = []
+        for r in range(n_rows):
+            s, e = int(indptr[r]), int(indptr[r + 1])
+            out.append({int(i): float(v) for i, v in zip(indices[s:e], data[s:e])
+                        if float(v) > 0.0})
+        return out
+
     def encode_documents(self, docs: list[str]) -> list[dict[int, float]]:
         """Encode documents to sparse vectors (dict dim->weight)."""
         if not self.is_fitted:
             raise RuntimeError("BM25Encoder is not fitted; call fit() or load() first")
-        return [self._csr_to_dict(m) for m in self._ef.encode_documents(docs)]
+        return self._rows_to_dicts(self._ef.encode_documents(docs))
 
     def encode_query(self, query: str) -> dict[int, float]:
         if not self.is_fitted:
             raise RuntimeError("BM25Encoder is not fitted; call fit() or load() first")
-        return self._csr_to_dict(self._ef.encode_queries([query])[0])
+        res = self._ef.encode_queries([query])
+        # v1.3.1 fix: pymilvus 2.6.x returns a scipy csr_array here; the old
+        # ``res[0]`` raised NotImplementedError (1D sparse slices) and took
+        # down EVERY hybrid search at the BM25 step. _rows_to_dicts extracts
+        # the single row via indptr slicing instead.
+        return self._rows_to_dicts(res)[0]
 
     @staticmethod
     def _csr_to_dict(m) -> dict[int, float]:

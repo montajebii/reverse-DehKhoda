@@ -187,9 +187,13 @@ def vector_ingest(em: Emitter, recreate: bool = False) -> dict[str, Any]:
                 pct=int(100 * done / max(1, total)) if total else 100)
 
     if not pending:
+        # v1.3.1 fix: count BEFORE closing the backend — the old code called
+        # backend.close() first, so the resumed-path count() ran against a
+        # closed client (error or 0) and the resumed stats lied.
+        count = backend.count()
         backend.close()
-        return {"entries": total, "chunks": backend.count(), "resumed": True,
-                "count": backend.count()}
+        return {"entries": total, "chunks": count, "resumed": True,
+                "count": count}
 
     first = True
     for start in range(0, len(pending), ID_CHUNK):
