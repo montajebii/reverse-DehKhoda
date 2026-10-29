@@ -125,98 +125,139 @@ jobs:
           path: model-e5.tar.gz
           retention-days: 14
 
-  # ================================================== Prebuilt index snapshot
-  # v1.3.1: the Qdrant snapshot is generated ONCE per release, BEFORE any
-  # platform build, with the EXACT production ingestion pipeline (the same
-  # bootstrap code path the wizard runs: db -> model -> ingest — no
-  # CI-only ingestion code). Cached across runs keyed by pins.json
-  # (qdrant_version + model revision + dataset commit all live there), so
-  # it rebuilds only when a pin changes.
-  #
-  # First run of a new pin set: pins.prebuilt_index.record_count /
-  # snapshot_sha256 are empty -> this job DEFINES them (meta artifact +
-  # job summary; the values get committed to pins.json in a small separate
-  # commit BEFORE the release tag). Any later run VERIFIES against the
-  # committed pin and FAILS THE BUILD on any mismatch — a truncated index
-  # silently returning fewer results is worse than no index at all.
-  build-index-snapshot:
-    name: prebuilt qdrant snapshot (production ingestion)
+  # ================================================== BM25 stats pre-job
+  # Option C: the 5 shard jobs must share ONE BM25 IDF statistics pickle —
+  # a per-shard fit would silently poison cross-shard sparse ranking. The
+  # pre-job fits on the deterministic first-30,000-row sample (EXACT corpus
+  # parity with the monolithic DehkhodaLoader.ingest fit path) and must
+  # match pins.bm25_stats.sha256 or this job dies in ~10 min — fail-fast
+  # instead of poisoning ~4h of shard embedding. Also the dumps-gz artifact
+  # source for the packaging jobs (the old snapshot job's role).
+  bm25-stats:
+    name: bm25 stats (corpus-wide fit, sha256-pinned)
     runs-on: ubuntu-latest
-    needs: [model-cache]
-    timeout-minutes: 360
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
-      # Cache key = the INPUTS that determine snapshot bytes (dataset commit
-      # + model revision + ingestion-code revision), NOT hashFiles(pins.json):
-      # the pin-fill commit rewrites pins.json, and a pins-derived key would
-      # MISS the cache on the very next run — forcing a second 6h rebuild
-      # whose snapshot sha256 then fails the strict re-verify (snapshot tar
-      # bytes are not deterministic). Bump the r<N> literal ONLY when the
-      # ingestion code changes without a dataset/model pin change.
-      - name: Compute snapshot cache key
-        id: snapkey
+      - name: Fetch pinned dumps + pack tarball
+        run: |
+          set -e
+          python3 scripts/fetch_pinned_dumps.py --dest dh-dumps --tar dumps.tar.gz
+      - name: Install Python deps (no torch — the fit needs analyzer + pymilvus only)
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -r backend/requirements-ci.txt
+      - name: Build bm25_stats.pkl + verify against the committed pin
+        run: |
+          set -e
+          SHA=$(python3 -c "import json;print(json.load(open('bootstrap/pins.json'))['bm25_stats']['sha256'])")
+          test -n "$SHA" || { echo 'FATAL: pins.bm25_stats.sha256 empty'; exit 1; }
+          DEHKHODA_DATA_DIR="$PWD/dh-bm25" python3 scripts/build_bm25_stats.py \
+            --dumps dh-dumps/dumps --out bm25_stats.pkl --expect-sha "$SHA"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bm25-stats
+          path: bm25_stats.pkl
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dumps-gz
+          path: dumps.tar.gz
+          retention-days: 14
+
+  # ================================================== Shard ingestion (Option C)
+  # 312,506 usable rows split POSITIONALLY into 5 deterministic ranges
+  # (bootstrap/ingest_shard.shard_range: base 62,501, remainder to shard 0 —
+  # contiguous, no overlap, stable across runs). Each job ingests its range
+  # with the EXACT production pipeline into its OWN runner-local qdrant and
+  # snapshots it. fail-fast: false: if one shard dies early the other four
+  # still finish so per-shard logs are comparable; the merge job depends on
+  # ALL five succeeding via needs:. SAFEGUARD 3 asserts (partition, chunker
+  # canary recount, pinned bm25) live inside bootstrap/ingest_shard.py.
+  ingest-shard:
+    name: ingest-shard (${{ matrix.shard }} of 5)
+    runs-on: ubuntu-latest
+    needs: [model-cache, bm25-stats]
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: model-tarball
+          path: .
+      - uses: actions/download-artifact@v4
+        with:
+          name: dumps-gz
+          path: .
+      - uses: actions/download-artifact@v4
+        with:
+          name: bm25-stats
+          path: .
+      - name: Compute shard cache key
+        id: shardkey
         run: |
           python3 - <<'PY'
           import json, os
           p = json.load(open("bootstrap/pins.json"))
-          key = ("index-snapshot-v1.3.1-r2-"
+          key = ("index-shard-v1.3.1-r3-${{ matrix.shard }}-"
                  + p["dehkhoda_dataset"]["commit"] + "-"
                  + p["embedding_model"]["revision"])
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-              f.write("skey=" + key + "\n")
-          print("snapshot cache key:", key)
+              f.write("key=" + key + "\n")
+          print("shard cache key:", key)
           PY
       - uses: actions/cache@v4
-        id: snap-cache
+        id: shard-cache
         with:
-          path: |
-            dehkhoda.snapshot.gz
-            prebuilt_index_meta.json
-          key: ${{ steps.snapkey.outputs.skey }}
-          restore-keys: ${{ steps.snapkey.outputs.skey }}
-      - name: Snapshot already cached -> verify bytes and re-upload
-        if: steps.snap-cache.outputs.cache-hit == 'true'
+          path: shard-out
+          key: ${{ steps.shardkey.outputs.key }}
+      - name: Cached shard -> verify + re-upload artifacts
+        if: steps.shard-cache.outputs.cache-hit == 'true'
         run: |
           set -e
-          test -f dehkhoda.snapshot.gz && test -f prebuilt_index_meta.json
+          test -f "shard-out/shard_report_${{ matrix.shard }}.json"
+          test -f "shard-out/shard_${{ matrix.shard }}.snapshot.gz"
           python3 - <<'PY'
           import hashlib, json
-          pins = json.load(open("bootstrap/pins.json"))["prebuilt_index"]
-          h = hashlib.sha256(open("dehkhoda.snapshot.gz", "rb").read()).hexdigest()
-          meta = json.load(open("prebuilt_index_meta.json"))
-          print("cached snapshot sha256:", h, "size:", meta["snapshot_size_bytes"])
-          if pins.get("snapshot_sha256") and h != pins["snapshot_sha256"]:
-              raise SystemExit(f"cached snapshot does not match the pin: {h} != {pins['snapshot_sha256']}")
-          if h != meta["snapshot_sha256"]:
-              raise SystemExit("cached snapshot does not match its own meta")
-          print("cached snapshot verified OK")
+          i = ${{ matrix.shard }}
+          rep = json.load(open(f"shard_out/shard_report_{i}.json"))
+          h = hashlib.sha256(open(f"shard_out/shard_{i}.snapshot.gz", "rb").read()).hexdigest()
+          assert h == rep["snapshot_sha256"], "cached snapshot does not match its own report"
+          pins = json.load(open("bootstrap/pins.json"))
+          assert rep["bm25_sha256"] == pins["bm25_stats"]["sha256"], \
+              "cached shard was built against a different bm25 pin"
+          assert rep["chunks"] > 0 and rep["rows_count"] > 0, "cached shard report is empty"
+          print("cached shard verified:", json.dumps(
+              {k: rep[k] for k in ("shard", "start_row", "end_row", "rows_count",
+                                   "chunks", "known_truncations")}))
           PY
       - uses: actions/upload-artifact@v4
-        if: steps.snap-cache.outputs.cache-hit == 'true'
+        if: steps.shard-cache.outputs.cache-hit == 'true'
         with:
-          name: index-snapshot
+          name: shard-snapshot-${{ matrix.shard }}
           path: |
-            dehkhoda.snapshot.gz
-            prebuilt_index_meta.json
+            shard-out/shard_${{ matrix.shard }}.snapshot.gz
+            shard-out/shard_report_${{ matrix.shard }}.json
           retention-days: 14
-      - name: Fetch dumps + packs (cache-miss path only)
-        if: steps.snap-cache.outputs.cache-hit != 'true'
-        run: |
-          set -e
-          python3 scripts/fetch_pinned_dumps.py --dest dh-dumps --tar dumps.tar.gz
-      - uses: actions/download-artifact@v4
-        if: steps.snap-cache.outputs.cache-hit != 'true'
-        with:
-          name: model-tarball
-          path: .
       - name: Install Python deps (real embedder path)
-        if: steps.snap-cache.outputs.cache-hit != 'true'
+        if: steps.shard-cache.outputs.cache-hit != 'true'
         run: |
           python3 -m pip install --upgrade pip
           python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
           python3 -m pip install -r backend/requirements.txt
-      - name: Fetch + start pinned qdrant engine (localhost, production config)
-        if: steps.snap-cache.outputs.cache-hit != 'true'
+      - name: Unpack dumps
+        if: steps.shard-cache.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          tar -xzf dumps.tar.gz
+          N=$(find dh-dumps/dumps -name '*.sql.gz' | wc -l)
+          test "$N" = "33" || { echo "FATAL: expected 33 dumps, found $N"; exit 1; }
+      - name: Fetch + start pinned qdrant engine (localhost)
+        if: steps.shard-cache.outputs.cache-hit != 'true'
         run: |
           set -e
           mkdir -p engine
@@ -240,30 +281,24 @@ jobs:
           QDRANT__SERVICE__HTTP_PORT=6333 QDRANT__SERVICE__HOST=127.0.0.1 \
             QDRANT__STORAGE__STORAGE_PATH="$PWD/engine-storage" \
             QDRANT__TELEMETRY_DISABLED=true \
-            nohup ./engine/qdrant > qdrant-snapshot.log 2>&1 &
+            nohup ./engine/qdrant > qdrant-shard.log 2>&1 &
           for i in $(seq 1 120); do
             curl -fsS http://127.0.0.1:6333/readyz >/dev/null 2>&1 && break
             sleep 1
           done
           curl -fsS http://127.0.0.1:6333/readyz
-          echo "qdrant ${QDRANT_VERSION:-} ready on 127.0.0.1:6333"
-      - name: Seed model + state, run db + ingest (EXACT production path)
-        if: steps.snap-cache.outputs.cache-hit != 'true'
+          echo "qdrant ready on 127.0.0.1:6333"
+      - name: Seed model + state (production path)
+        if: steps.shard-cache.outputs.cache-hit != 'true'
         env:
-          DEHKHODA_DATA_DIR: "$PWD/dh-snapshot-data"
+          DEHKHODA_DATA_DIR: "$PWD/dh-shard-data"
           DEHKHODA_PREFER_NATIVE: "1"
-          OMP_NUM_THREADS: "4"
-          DEHKHODA_EMBED_BATCH_SIZE: "128"
         run: |
           set -e
           mkdir -p "$DEHKHODA_DATA_DIR"
           tar -xzf model-e5.tar.gz -C "$DEHKHODA_DATA_DIR"
-          cp -r dh-dumps "$DEHKHODA_DATA_DIR/dehkhoda_dumps"
           python3 - <<'PY'
-          # seed ONLY what the wizard would have decided: model dir + ready
-          # marker + engine preference. Everything else is the real flow.
           import sys
-          from pathlib import Path
           sys.path.insert(0, ".")
           from bootstrap import model_download, paths, state
           rev = model_download.revision()
@@ -278,148 +313,217 @@ jobs:
           state.set_value("backend", "qdrant_native")
           print("state seeded:", rev)
           PY
-          # db step: launch() with DEHKHODA_PREFER_NATIVE=1 reuses the live
-          # 6333 sidecar (server mode — snapshots REQUIRE the native engine;
-          # qdrant-client local mode does not support them).
-          python3 backend/scripts/entry.py bootstrap --step db > db.jsonl 2> db.err \
-            || { echo 'db step FAILED:'; cat db.err; tail -5 db.jsonl; exit 1; }
-          tail -1 db.jsonl | grep -q '"ok": *true' \
-            || { echo 'db step not ok:'; tail -3 db.jsonl db.err; exit 1; }
-          tail -1 db.jsonl
-          # ingest step: THE production ingestion (312,506 rows -> chunks ->
-          # e5 dense + BM25 sparse -> qdrant). This is the long step.
-          # Run it in the background with a watchdog: every 10 min the last
-          # checkpoint event goes to the JOB LOG, so a timeout/infra kill
-          # always leaves progress evidence (attempt-2 lost everything).
-          python3 backend/scripts/entry.py bootstrap --step ingest > ingest.jsonl 2> ingest.err &
-          ING_PID=$!
-          for i in $(seq 1 34); do
-            sleep 600
-            kill -0 "$ING_PID" 2>/dev/null || break
-            LAST=$(tail -1 ingest.jsonl 2>/dev/null || true)
-            echo "[watchdog ${i}] pid=$ING_PID last_event: ${LAST:-<none yet>}"
-          done
-          wait "$ING_PID" || { echo 'ingest step FAILED:'; cat ingest.err; tail -5 ingest.jsonl; exit 1; }
-          tail -1 ingest.jsonl | grep -q '"ok": *true' \
-            || { echo 'ingest step not ok:'; tail -3 ingest.jsonl ingest.err; exit 1; }
-          tail -1 ingest.jsonl
-      - name: Assert staging integrity + collection record count
-        if: steps.snap-cache.outputs.cache-hit != 'true'
+      - name: Ingest shard range (SAFEGUARD 3 asserts + heartbeat inside)
+        if: steps.shard-cache.outputs.cache-hit != 'true'
         env:
-          DEHKHODA_DATA_DIR: "$PWD/dh-snapshot-data"
+          DEHKHODA_DATA_DIR: "$PWD/dh-shard-data"
+          DEHKHODA_BACKEND: "qdrant"
+          DEHKHODA_QDRANT_MODE: "server"
+          DEHKHODA_QDRANT_URL: "http://127.0.0.1:6333"
+          DEHKHODA_COLLECTION_NAME: "dehkhoda"
+          DEHKHODA_EMBED_BATCH_SIZE: "128"
+          OMP_NUM_THREADS: "4"
+          PYTHONHASHSEED: "0"
         run: |
           set -e
-          python3 - <<'PY'
-          import json, sqlite3, sys
-          from pathlib import Path
-          sys.path.insert(0, ".")
-          from bootstrap import dehkhoda_ingest, paths
-          from qdrant_client import QdrantClient
-
-          con = sqlite3.connect(paths.data_dir() / "dehkhoda_stage.db")
-          rows = con.execute("SELECT COUNT(*) FROM words").fetchone()[0]
-          con.close()
-          assert rows == dehkhoda_ingest.USABLE_ROWS, (
-              f"staging rows {rows} != pinned usable rows {dehkhoda_ingest.USABLE_ROWS}")
-          print(f"staging integrity: {rows} rows == pinned {dehkhoda_ingest.USABLE_ROWS}")
-
-          pins = json.load(open("bootstrap/pins.json"))["prebuilt_index"]
-          c = QdrantClient(url="http://127.0.0.1:6333", timeout=60.0)
-          info = c.get_collection(pins["collection_name"])
-          count = c.count(pins["collection_name"], exact=True).count
-          print(f"collection {pins['collection_name']}: {count} points")
-          assert count > 0, "empty collection"
-          if pins.get("record_count"):
-              assert count == pins["record_count"], (
-                  f"record_count {count} != pin {pins['record_count']} — "
-                  "dataset or vector config drifted; do NOT ship this snapshot")
-              print("record_count matches the committed pin")
-          else:
-              print(f"PIN-FILL: record_count={count} (first run — commit into pins.json)")
-          c.close()
-          Path("RECORD_COUNT.txt").write_text(str(count))
-          PY
-      - name: Create snapshot, gzip, sha256, verify-or-define pin
-        if: steps.snap-cache.outputs.cache-hit != 'true'
-        env:
-          DEHKHODA_DATA_DIR: "$PWD/dh-snapshot-data"
-        run: |
-          set -e
-          python3 - <<'PY'
-          import gzip, hashlib, json, shutil, sys, time, urllib.request
-          from datetime import datetime, timezone
-          from pathlib import Path
-          sys.path.insert(0, ".")
-          from qdrant_client import QdrantClient
-
-          pins = json.load(open("bootstrap/pins.json"))["prebuilt_index"]
-          c = QdrantClient(url="http://127.0.0.1:6333", timeout=120.0)
-          t0 = time.time()
-          snap = c.create_snapshot(pins["collection_name"], wait=True)
-          name = snap.name
-          print(f"snapshot created: {name} in {time.time()-t0:.1f}s")
-          c.close()
-
-          raw = Path("dehkhoda.snapshot")
-          url = f"http://127.0.0.1:6333/collections/{pins['collection_name']}/snapshots/{name}"
-          with urllib.request.urlopen(url, timeout=600) as r, open(raw, "wb") as f:
-              shutil.copyfileobj(r, f)
-          print(f"downloaded {raw.stat().st_size} bytes")
-
-          gz = Path("dehkhoda.snapshot.gz")
-          with open(raw, "rb") as src, gzip.GzipFile(fileobj=open(gz, "wb"), compresslevel=9) as dst:
-              shutil.copyfileobj(src, dst)
-          raw.unlink()
-          sha = hashlib.sha256(gz.read_bytes()).hexdigest()
-          count = int(Path("RECORD_COUNT.txt").read_text())
-          meta = {
-              "qdrant_version": pins["qdrant_version"],
-              "model_revision": pins["embedding_model_revision"],
-              "dataset_commit_sha": pins["dataset_commit_sha"],
-              "collection_name": pins["collection_name"],
-              "dense_dim": pins["dense_dim"],
-              "distance": pins["distance"],
-              "sparse_metric": pins["sparse_metric"],
-              "record_count": count,
-              "snapshot_sha256": sha,
-              "snapshot_size_bytes": gz.stat().st_size,
-              "built_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-          }
-          Path("prebuilt_index_meta.json").write_text(json.dumps(meta, indent=1))
-          print(json.dumps(meta, indent=1))
-
-          pin = json.load(open("bootstrap/pins.json"))["prebuilt_index"]
-          if pin.get("snapshot_sha256"):
-              assert sha == pin["snapshot_sha256"], (
-                  f"snapshot sha256 {sha} != pin {pin['snapshot_sha256']}")
-              assert gz.stat().st_size == pin.get("snapshot_size_bytes",
-                                                  gz.stat().st_size), "size drift"
-              print("snapshot verified against the committed pin")
-          else:
-              print("PIN-FILL: snapshot_sha256=" + sha)
-              print("PIN-FILL: snapshot_size_bytes=" + str(gz.stat().st_size))
-              print("PIN-FILL: built_at=" + meta["built_at"])
-          PY
-          rm -f dehkhoda.snapshot
-      - name: Pack dumps artifact + upload snapshot artifacts
-        if: steps.snap-cache.outputs.cache-hit != 'true'
-        run: |
-          set -e
-          ls -la dehkhoda.snapshot.gz prebuilt_index_meta.json dumps.tar.gz
-          cat prebuilt_index_meta.json
+          mkdir -p shard-out
+          python3 bootstrap/ingest_shard.py \
+            --shard ${{ matrix.shard }} --shards 5 \
+            --dumps dh-dumps/dumps \
+            --bm25-stats bm25_stats.pkl \
+            --out shard-out
       - uses: actions/upload-artifact@v4
-        if: steps.snap-cache.outputs.cache-hit != 'true'
+        if: steps.shard-cache.outputs.cache-hit != 'true'
+        with:
+          name: shard-snapshot-${{ matrix.shard }}
+          path: |
+            shard-out/shard_${{ matrix.shard }}.snapshot.gz
+            shard-out/shard_report_${{ matrix.shard }}.json
+          retention-days: 14
+
+  # ================================================== Merge (Option C)
+  # Restores the 5 shard snapshots into temp collections, scrolls + upserts
+  # every point into the production main collection (5,000-point batches,
+  # progress line per batch, 60-min soft / 90-min hard timeout — SAFEGUARD 4),
+  # asserts the two sums (351,156 chunks / 384 truncations +-0 — SAFEGUARD 3),
+  # runs the 3 fixed Persian semantic probes (SAFEGUARD 2: dense exact cosine
+  # > 0.5 + hybrid >= 1 hit + non-empty payload; sparse-only 0 hits = WARN),
+  # and ONLY THEN takes the final snapshot and prints the PIN-FILL values.
+  # NEVER merges via recover_snapshot chaining (empirically falsified).
+  merge-index:
+    name: merge shards -> final snapshot (probes + pin)
+    runs-on: ubuntu-latest
+    needs: [bm25-stats, ingest-shard]
+    timeout-minutes: 170
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: shard-snapshot-*
+          path: shard-artifacts
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: bm25-stats
+          path: .
+      - uses: actions/download-artifact@v4
+        with:
+          name: model-tarball
+          path: .
+      - name: Compute merge cache key
+        id: mergekey
+        run: |
+          python3 - <<'PY'
+          import json, os
+          p = json.load(open("bootstrap/pins.json"))
+          key = ("index-snapshot-v1.3.1-r3-"
+                 + p["dehkhoda_dataset"]["commit"] + "-"
+                 + p["embedding_model"]["revision"])
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write("key=" + key + "\n")
+          print("merge cache key:", key)
+          PY
+      - uses: actions/cache@v4
+        id: merge-cache
+        with:
+          path: |
+            merge-out/dehkhoda.snapshot.gz
+            merge-out/prebuilt_index_meta.json
+            merge-out/merge_report.json
+          key: ${{ steps.mergekey.outputs.key }}
+      - name: Cached merge -> verify + re-upload artifacts
+        if: steps.merge-cache.outputs.cache-hit == 'true'
+        run: |
+          set -e
+          test -f merge-out/dehkhoda.snapshot.gz
+          test -f merge-out/prebuilt_index_meta.json
+          cp bm25_stats.pkl merge-out/bm25_stats.pkl
+          python3 - <<'PY'
+          import hashlib, json
+          pins_root = json.load(open("bootstrap/pins.json"))
+          h = hashlib.sha256(open("merge-out/dehkhoda.snapshot.gz", "rb").read()).hexdigest()
+          meta = json.load(open("merge-out/prebuilt_index_meta.json"))
+          assert h == meta["snapshot_sha256"], "cached snapshot does not match its own meta"
+          pin = pins_root["prebuilt_index"].get("snapshot_sha256")
+          if pin:
+              assert h == pin, f"cached snapshot {h} != committed pin {pin}"
+          bm = hashlib.sha256(open("merge-out/bm25_stats.pkl", "rb").read()).hexdigest()
+          assert bm == pins_root["bm25_stats"]["sha256"], "bm25 pkl does not match the pin"
+          print("cached merge verified: record_count", meta["record_count"], h[:12])
+          PY
+      - uses: actions/upload-artifact@v4
+        if: steps.merge-cache.outputs.cache-hit == 'true'
         with:
           name: index-snapshot
           path: |
-            dehkhoda.snapshot.gz
-            prebuilt_index_meta.json
+            merge-out/dehkhoda.snapshot.gz
+            merge-out/prebuilt_index_meta.json
+            merge-out/bm25_stats.pkl
+            merge-out/merge_report.json
           retention-days: 14
+      - name: Install Python deps (probe embedder needs torch)
+        if: steps.merge-cache.outputs.cache-hit != 'true'
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python3 -m pip install -r backend/requirements.txt
+      - name: Fetch + start pinned qdrant engine (localhost)
+        if: steps.merge-cache.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          mkdir -p engine
+          python3 - <<'PY'
+          import shutil, sys, tarfile
+          from pathlib import Path
+          sys.path.insert(0, ".")
+          from bootstrap import model_fetcher
+          pins = model_fetcher.load_pins()["qdrant"]
+          f = pins["files"]["linux-x86_64"]
+          dest = Path("engine") / f["name"]
+          model_fetcher.download_file(f"{pins['base_url']}/{f['name']}", dest, sha256=f["sha256"])
+          with tarfile.open(dest) as tf:
+              tf.extractall("engine/x")
+          src = next(p for p in Path("engine/x").rglob("qdrant") if p.is_file())
+          shutil.move(str(src), "engine/qdrant")
+          Path("engine/qdrant").chmod(0o755)
+          print("qdrant engine ready:", pins["version"])
+          PY
+          mkdir -p dh-merge/qdrant-server
+          QDRANT__SERVICE__HTTP_PORT=6333 QDRANT__SERVICE__HOST=127.0.0.1 \
+            QDRANT__STORAGE__STORAGE_PATH="$PWD/dh-merge/qdrant-server" \
+            QDRANT__TELEMETRY_DISABLED=true \
+            nohup ./engine/qdrant > qdrant-merge.log 2>&1 &
+          for i in $(seq 1 120); do
+            curl -fsS http://127.0.0.1:6333/readyz >/dev/null 2>&1 && break
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:6333/readyz
+          echo "qdrant ready on 127.0.0.1:6333"
+      - name: Seed model (probes embed queries)
+        if: steps.merge-cache.outputs.cache-hit != 'true'
+        env:
+          DEHKHODA_DATA_DIR: "$PWD/dh-merge"
+        run: |
+          set -e
+          tar -xzf model-e5.tar.gz -C "$DEHKHODA_DATA_DIR"
+          python3 - <<'PY'
+          import sys
+          sys.path.insert(0, ".")
+          from bootstrap import model_download, paths, state
+          rev = model_download.revision()
+          tdir = paths.models_root() / rev
+          assert (tdir / "model.safetensors").exists(), "seed model missing"
+          model_download.ensure_model_ready("seeded")
+          st = state.load()
+          st["model"] = {"source": "seeded", "dir": str(tdir),
+                         "revision": rev, "verified": True}
+          state.save(st)
+          state.set_value("embedder", "e5-base")
+          state.set_value("backend", "qdrant_native")
+          print("state seeded:", rev)
+          PY
+      - name: Merge shards -> SAFEGUARD asserts -> probes -> final snapshot
+        if: steps.merge-cache.outputs.cache-hit != 'true'
+        env:
+          DEHKHODA_DATA_DIR: "$PWD/dh-merge"
+          DEHKHODA_QDRANT_STORAGE: "$PWD/dh-merge/qdrant-server"
+          DEHKHODA_BACKEND: "qdrant"
+          DEHKHODA_QDRANT_MODE: "server"
+          DEHKHODA_QDRANT_URL: "http://127.0.0.1:6333"
+          DEHKHODA_COLLECTION_NAME: "dehkhoda"
+          DEHKHODA_EMBED_BATCH_SIZE: "128"
+          PYTHONHASHSEED: "0"
+        run: |
+          set -e
+          mkdir -p merge-out
+          python3 bootstrap/merge_index.py \
+            --shards-artifacts shard-artifacts \
+            --bm25-stats bm25_stats.pkl \
+            --out merge-out
+      - name: Assert index-snapshot artifact contains bm25_stats.pkl
+        if: steps.merge-cache.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          cp bm25_stats.pkl merge-out/bm25_stats.pkl
+          test -f merge-out/bm25_stats.pkl
+          python3 - <<'PY'
+          import hashlib, json
+          pins = json.load(open("bootstrap/pins.json"))
+          h = hashlib.sha256(open("merge-out/bm25_stats.pkl", "rb").read()).hexdigest()
+          assert h == pins["bm25_stats"]["sha256"], "bm25 pkl in the artifact != pin"
+          meta = json.load(open("merge-out/prebuilt_index_meta.json"))
+          assert meta["bm25_stats_sha256"] == h, "meta bm25 sha != artifact pkl"
+          print("index-snapshot artifact contains bm25_stats.pkl (sha256 pinned OK)")
+          PY
       - uses: actions/upload-artifact@v4
-        if: steps.snap-cache.outputs.cache-hit != 'true'
+        if: steps.merge-cache.outputs.cache-hit != 'true'
         with:
-          name: dumps-gz
-          path: dumps.tar.gz
+          name: index-snapshot
+          path: |
+            merge-out/dehkhoda.snapshot.gz
+            merge-out/prebuilt_index_meta.json
+            merge-out/bm25_stats.pkl
+            merge-out/merge_report.json
           retention-days: 14
 
   # ================================================== Linux packages
@@ -435,7 +539,7 @@ jobs:
   build-linux:
     name: packages (linux, debian-12 container)
     runs-on: ubuntu-latest
-    needs: [model-cache, build-index-snapshot]
+    needs: [model-cache, merge-index]
     container:
       image: python:3.12-slim-bookworm
     steps:
@@ -487,6 +591,8 @@ jobs:
           # v1.3.1: dataset + prebuilt index bundle (full variant only)
           DEHKHODA_DATASET_TARBALL: "$PWD/dumps.tar.gz"
           DEHKHODA_INDEX_SNAPSHOT: "$PWD/dehkhoda.snapshot.gz"
+          # v1.3.1 Option C: corpus-wide BM25 stats ride in the same artifact
+          DEHKHODA_BM25_STATS: "$PWD/bm25_stats.pkl"
           # no /dev/fuse anywhere on CI — extract-and-run sidesteps FUSE for
           # the AppImage-based bundler tools (linuxdeploy, appimagetool)
           APPIMAGE_EXTRACT_AND_RUN: "1"
@@ -660,7 +766,7 @@ jobs:
   build-windows:
     name: installer (windows, full + lean)
     runs-on: windows-latest
-    needs: [model-cache, build-index-snapshot]
+    needs: [model-cache, merge-index]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -774,6 +880,11 @@ jobs:
           cp dehkhoda.snapshot.gz desktop/src-tauri/resources/dehkhoda-server/_internal/index/dehkhoda.snapshot.gz
           ACTUAL=$(sha256sum desktop/src-tauri/resources/dehkhoda-server/_internal/index/dehkhoda.snapshot.gz | awk '{print $1}')
           test "$ACTUAL" = "$SHA_PIN" || { echo "FATAL: snapshot sha mismatch: $ACTUAL != $SHA_PIN"; exit 1; }
+          # v1.3.1 Option C: corpus-wide BM25 stats beside the snapshot
+          cp bm25_stats.pkl desktop/src-tauri/resources/dehkhoda-server/_internal/index/bm25_stats.pkl
+          ACTUAL_BM25=$(sha256sum desktop/src-tauri/resources/dehkhoda-server/_internal/index/bm25_stats.pkl | awk '{print $1}')
+          BM25_PIN=$(python -c "import json;print(json.load(open('bootstrap/pins.json'))['bm25_stats']['sha256'])")
+          test "$ACTUAL_BM25" = "$BM25_PIN" || { echo "FATAL: bm25 stats sha mismatch: $ACTUAL_BM25 != $BM25_PIN"; exit 1; }
           printf '{"variant":"full","model":true,"dataset":true,"index":true}\n' \
             > desktop/src-tauri/resources/dehkhoda-server/_internal/bundle.json
           cat desktop/src-tauri/resources/dehkhoda-server/_internal/bundle.json
@@ -880,7 +991,7 @@ jobs:
   # ================================================== GitHub Release
   release:
     name: github-release (4 variants + SHA256SUMS.all)
-    needs: [container-tests, windows-bootstrap, model-cache, build-index-snapshot,
+    needs: [container-tests, windows-bootstrap, model-cache, merge-index,
             build-linux, linux-acceptance, build-windows]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
