@@ -20,6 +20,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import pickle
 import sys
 import tempfile
 from pathlib import Path
@@ -27,7 +28,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
-from bootstrap import index_restore, paths  # noqa: E402
+from bootstrap import index_restore, model_fetcher, paths  # noqa: E402
 
 RESULTS: list[tuple[str, bool, str]] = []
 
@@ -46,6 +47,12 @@ FAKE_PINS = {
     "snapshot_sha256": "",
     "snapshot_size_bytes": 0,
 }
+
+# full pins for the bm25 install path (model_fetcher.load_pins is patched to
+# return this during the restore happy-path simulation)
+FAKE_PINS_FULL = dict(FAKE_PINS, bm25_stats={"sha256": "", "sample_size": 2})
+# NOTE: install_bundled_bm25 reads pins.bm25_stats.sha256; the happy-path
+# test rewrites the sha256 at runtime to the fixture pickle's real digest.
 
 
 class _PinsPatch:
@@ -174,6 +181,19 @@ def main() -> int:
 
             orig_client = index_restore._native_client
             orig_snapdir = index_restore._snapshots_dir
+            # v1.3.1 Option C fixture: the bundle must carry bm25_stats.pkl —
+            # restore installs it into the data dir (ship-blocker closure)
+            bm25_src = base / "bm25_stats_fixture.pkl"
+            bm25_src.write_bytes(pickle.dumps(
+                {"idf": [0.1, 0.2], "corpus_size": 2, "avgdl": 3.0,
+                 "k1": 1.5, "b": 0.75, "epsilon": 0.25}))
+            bm25_sha = hashlib.sha256(bm25_src.read_bytes()).hexdigest()
+            orig_bundled_bm25 = paths.bundled_bm25_stats
+            orig_load_pins = model_fetcher.load_pins
+            paths.bundled_bm25_stats = lambda: bm25_src  # type: ignore[assignment]
+            model_fetcher.load_pins = lambda: dict(
+                FAKE_PINS_FULL,
+                bm25_stats={"sha256": bm25_sha, "sample_size": 2})  # type: ignore[assignment]
             snap_stage = base / "server-snapshots"
             snap_stage.mkdir()
             index_restore._native_client = lambda timeout=600.0: (FakeClient(),  # type: ignore[assignment]
@@ -198,12 +218,25 @@ def main() -> int:
                           ready["mode"] == "restored"
                           and ready["record_count"] == 1234
                           and ready["snapshot_sha256"] == gz_sha)
+                    # v1.3.1 Option C: the restore must install the BM25 stats
+                    installed = base / "bm25_stats.pkl"
+                    check("restore installed bm25_stats.pkl into the data dir",
+                          installed.exists())
+                    check("installed bm25 stats sha256 matches the pin",
+                          installed.exists()
+                          and hashlib.sha256(installed.read_bytes()).hexdigest()
+                          == bm25_sha)
+                    check("restore result + marker carry bm25_sha256",
+                          res.get("bm25_sha256") == bm25_sha
+                          and ready.get("bm25_sha256") == bm25_sha)
                     check("staged plain tar cleaned up",
                           not (index_restore._snapshots_dir()
                                / "dehkhoda.restore.snapshot").exists())
             finally:
                 index_restore._native_client = orig_client  # type: ignore[assignment]
                 index_restore._snapshots_dir = orig_snapdir  # type: ignore[assignment]
+                paths.bundled_bm25_stats = orig_bundled_bm25  # type: ignore[assignment]
+                model_fetcher.load_pins = orig_load_pins  # type: ignore[assignment]
 
             # ---- 7. rebuild without bundled dumps fails clearly -------------
             orig_dumps = paths.bundled_dumps_dir

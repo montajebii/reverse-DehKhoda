@@ -30,6 +30,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import shutil
 import time
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -157,6 +158,47 @@ def _native_client(timeout: float = 600.0) -> tuple[Any, str]:
     raise RestoreNeedsServerError(
         f"snapshot restore needs the native qdrant sidecar (server mode); "
         f"runtime engine is {runtime.get('engine')!r}")
+
+
+# =========================================================================
+# bundled BM25 stats installation (v1.3.1 Option C runtime closure)
+# =========================================================================
+def install_bundled_bm25(data_dir: Optional[Path] = None) -> dict:
+    """Copy the bundled bm25_stats.pkl into the data dir — sha256-verified.
+
+    The restored Qdrant snapshot carries the vectors but NOT the BM25 IDF
+    statistics; the sidecar loads them from <data_dir>/bm25_stats.pkl
+    (app.main). Without this copy the full variant would silently refit BM25
+    on runtime data (or run with no sparse ranking at all) — breaking the
+    zero-network, fully-working promise of v1.3.1. NEVER silent: a missing
+    or hash-mismatched bundle pkl raises loudly (Persian message first —
+    this is a user-facing desktop app).
+    """
+    from .model_fetcher import load_pins
+
+    base = data_dir or paths.data_dir()
+    pins_root = load_pins()
+    expected = str((pins_root.get("bm25_stats") or {}).get("sha256") or "")
+    src = paths.bundled_bm25_stats()
+    if not src:
+        raise RuntimeError(
+            "\u0641\u0627\u06cc\u0644 \u0622\u0645\u0627\u0631\u0647\u0654 BM25 \u062f\u0631 \u0628\u0633\u062a\u0647 \u06cc\u0627\u0641\u062a \u0646\u0634\u062f "
+            "(_internal/index/bm25_stats.pkl). \u0627\u06cc\u0646\u062f\u06a9\u0633 \u0628\u0627\u0632\u06cc\u0627\u0628\u06cc\u200c\u0634\u062f\u0647 \u0628\u062f\u0648\u0646 "
+            "\u0622\u0646 \u0628\u0647\u200c\u0637\u0648\u0631 \u067e\u0646\u0647\u0627\u0646\u06cc \u0628\u0647\u200c\u0631\u0648\u0632\u0631\u0633\u0627\u0646\u06cc \u0645\u06cc\u200c\u0634\u0648\u062f \u2014 \u0627\u062c\u0627\u0632\u0647 \u0646\u062f\u0627\u0631\u062f. "
+            f"(bundled bm25_stats.pkl missing; pinned sha256={expected or '<none>'})")
+    actual = _sha256_file(src)
+    if expected and actual != expected:
+        raise RuntimeError(
+            "\u0622\u0645\u0627\u0631\u0647\u0654 BM25 \u062f\u0631 \u0628\u0633\u062a\u0647 \u0628\u0627 \u0642\u0644\u0627\u0628 \u0645\u0637\u0627\u0628\u0642\u062a \u0646\u062f\u0627\u0631\u062f. "
+            f"(bundled bm25_stats.pkl sha256 mismatch: expected {expected}, "
+            f"got {actual})")
+    base.mkdir(parents=True, exist_ok=True)
+    dst = base / "bm25_stats.pkl"
+    if not (dst.exists() and _sha256_file(dst) == actual):
+        tmp = base / "bm25_stats.pkl.tmp"
+        shutil.copyfile(src, tmp)
+        tmp.replace(dst)
+    return {"installed": str(dst), "sha256": actual, "source": str(src)}
 
 
 # =========================================================================
@@ -288,12 +330,18 @@ def restore_bundled(snapshot_path: Optional[Path] = None,
                 "worse than no index)")
         prog("count", gz_bytes_total, gz_bytes_total)
 
-        # ---- 5. write the marker ---------------------------------------
+        # ---- 5. install the bundled BM25 stats (NEVER silent) -----------
         prog("ready", gz_bytes_total, gz_bytes_total)
+        bm25_install = install_bundled_bm25(base)
+
+        # ---- 6. write the marker ---------------------------------------
         meta = write_ready(base, count, "restored", actual_sha,
                            int((time.time() - t0) * 1000), actual_sha)
+        meta["bm25_sha256"] = bm25_install["sha256"]
+        _write_ready(base, meta)
         return {"mode": "restored", "record_count": count, "url": url,
                 "snapshot_sha256": actual_sha, "snapshot_size_bytes": gz_bytes_total,
+                "bm25_sha256": bm25_install["sha256"],
                 "duration_ms": meta["duration_ms"], "source_sha256": actual_sha}
     finally:
         # remove the staged plain tar (the snapshots dir must not accumulate

@@ -234,6 +234,28 @@ def bundled_snapshot() -> Optional[Path]:
     return None
 
 
+def bundled_bm25_stats() -> Optional[Path]:
+    """Bundled BM25 IDF statistics (full variant, v1.3.1 Option C).
+
+    Staged by the release build next to the snapshot at
+    _internal/index/bm25_stats.pkl. index_restore copies it into the data
+    dir after a snapshot restore so the sidecar's BM25Encoder loads the
+    EXACT corpus-wide IDF stats the index was built with — a runtime refit
+    on the (single-)user's data would silently poison sparse ranking.
+    Returns None for lean builds or when the staging file is missing.
+    """
+    for base in (app_dir() / "_internal" / "index",
+                 app_dir() / "index",
+                 app_dir().parent / "index"):
+        try:
+            p = base / "bm25_stats.pkl"
+            if p.is_file() and p.stat().st_size > 0:
+                return p
+        except OSError:
+            continue
+    return None
+
+
 def index_ready_path() -> Path:
     """Marker for the restored/built vector index (v1.3.1).
 

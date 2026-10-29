@@ -123,7 +123,31 @@ async def lifespan(app: FastAPI):
         stats_path=s.resolved_data_dir() / "bm25_stats.pkl",
     )
     # If a previous ingestion fitted BM25 stats, load them now.
-    state.bm25.load()
+    if not state.bm25.load():
+        # v1.3.1 (Option C runtime closure): a RESTORED bundle index is only
+        # complete with its corpus-wide BM25 stats — index_restore installs
+        # them right after the snapshot restore. If they are STILL missing
+        # the bundle is broken: fail LOUDLY (Persian message first), never
+        # silently refit on runtime data (that would poison sparse ranking
+        # and break the zero-network promise).
+        bundled_index = False
+        marker_mode = ""
+        try:
+            from bootstrap import index_restore as _ir
+            from bootstrap import paths as _paths
+
+            bundled_index = _paths.bundled_snapshot() is not None
+            marker_mode = str(_ir.read_ready_meta().get("mode") or "")
+        except Exception:  # pragma: no cover - bootstrap missing in some tests
+            pass
+        if bundled_index or marker_mode == "restored":
+            raise RuntimeError(
+                "فایل آمارهٔ BM25 در پوشهٔ داده یافت نشد (bm25_stats.pkl). "
+                "ایندکس بازیابی‌شده بدون آن کامل نیست و جست‌وجوی واژگانی از کار می‌افتد؛ "
+                "برای رفع مشکل، نسخهٔ کامل را دوباره نصب کنید یا ایندکس را از داده‌های همراه بازسازی کنید. "
+                "(startup assertion: data_dir/bm25_stats.pkl missing after a "
+                "bundled-index restore — refusing to silently refit BM25)")
+        logger.info("no pre-fitted BM25 stats (lean/dev path — ingestion will fit them)")
     # Ensure the collection exists (dim must match the configured embedder).
     try:
         state.backend.ensure_collection(dim=state.embedder.dim, recreate=False)

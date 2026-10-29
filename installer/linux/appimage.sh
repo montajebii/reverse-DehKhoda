@@ -251,6 +251,25 @@ for VARIANT in ${VARIANTS}; do
       log "FATAL: snapshot sha256 mismatch — pinned=${SNAPSHOT_SHA_PIN} actual=${ACTUAL_SHA}"; exit 1; }
     log "snapshot staged into _internal/index ($(wc -c < "${RES}/dehkhoda-server/_internal/index/dehkhoda.snapshot.gz") bytes, sha256 verified)"
 
+    # ---- v1.3.1 Option C: bundled BM25 stats — sha256-pinned, fail loudly.
+    # The restored snapshot carries vectors but NOT the corpus-wide BM25 IDF
+    # stats; index_restore installs this file into the data dir at first run
+    # and app.main FAILS the startup if it is missing after a restore.
+    BM25_SHA_PIN="$(python3 -c "import json;print(json.load(open('${ROOT}/bootstrap/pins.json'))['bm25_stats']['sha256'])")"
+    BM25_FILE=""
+    if [ -n "${DEHKHODA_BM25_STATS:-}" ] && [ -f "${DEHKHODA_BM25_STATS}" ]; then
+      BM25_FILE="${DEHKHODA_BM25_STATS}"
+    elif [ -f "${OUT}/bm25_stats.pkl" ]; then
+      BM25_FILE="${OUT}/bm25_stats.pkl"
+    fi
+    [ -n "${BM25_FILE}" ] || {
+      log "FATAL: full variant requires the bundled BM25 stats (DEHKHODA_BM25_STATS or dist-linux/bm25_stats.pkl)"; exit 1; }
+    ACTUAL_BM25_SHA=$(sha256sum "${BM25_FILE}" | awk '{print $1}')
+    [ "${ACTUAL_BM25_SHA}" = "${BM25_SHA_PIN}" ] || {
+      log "FATAL: bm25_stats.pkl sha256 mismatch — pinned=${BM25_SHA_PIN} actual=${ACTUAL_BM25_SHA}"; exit 1; }
+    cp -f "${BM25_FILE}" "${RES}/dehkhoda-server/_internal/index/bm25_stats.pkl"
+    log "bm25 stats staged into _internal/index ($(wc -c < "${RES}/dehkhoda-server/_internal/index/bm25_stats.pkl") bytes, sha256 verified)"
+
     # ---- v1.3.1: bundle manifest — the zero-network guard's source of truth
     python3 - "${RES}/dehkhoda-server/_internal/bundle.json" <<'PYEOF'
 import json, sys
