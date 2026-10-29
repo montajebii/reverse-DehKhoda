@@ -243,6 +243,12 @@
   ],
   "total_bytes": 53956669
  },
+ "bm25_stats": {
+  "$comment": "v1.3.1 Option C: BM25 IDF statistics fitted ONCE on the deterministic first-30,000-row sample (ORDER BY id, meaning_clean — identical corpus to the monolithic DehkhodaLoader.ingest fit path) and pinned by sha256. The 5 CI shard jobs LOAD these stats (never refit) so cross-shard sparse ranking is consistent; the pre-job (scripts/build_bm25_stats.py) rebuilds and must match this pin or die fast. Cross-process byte-exactness proven twice locally (and the pickle re-built byte-identical after the sandbox reset).",
+  "sample_size": 30000,
+  "sha256": "3c927b3b4c537c2f417ef4b5259d39fb2625156862295124959fd911bde9c2d4",
+  "bytes": 4099754
+ },
  "prebuilt_index": {
   "$comment": "v1.3.1 prebuilt Qdrant snapshot pin. The CI job build-index-snapshot generates the snapshot ONCE per release with the EXACT production ingestion pipeline, then verifies every field below. snapshot_sha256/snapshot_size_bytes/record_count are filled by the first successful CI run (small follow-up commit before the tag is pushed); later runs FAIL THE BUILD on any mismatch. Restoring requires the NATIVE qdrant sidecar in server mode — qdrant-client local mode does not support snapshots, so the full variant always launches qdrant_native first.",
   "qdrant_version": "v1.20.0",
