@@ -1,0 +1,2 @@
+v1.3.1: truly-offline full variant with prebuilt Qdrant index — zero-network closure, snapshot restore + offline rebuild, offline acceptance gates (Test A/Test C)
+
