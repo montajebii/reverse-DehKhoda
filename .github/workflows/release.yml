@@ -153,7 +153,9 @@ jobs:
           SHA=$(python3 -c "import json;print(json.load(open('bootstrap/pins.json'))['bm25_stats']['sha256'])")
           test -n "$SHA" || { echo 'FATAL: pins.bm25_stats.sha256 empty'; exit 1; }
           DEHKHODA_DATA_DIR="$PWD/dh-bm25" python3 scripts/build_bm25_stats.py \
-            --dumps dh-dumps/dumps --out bm25_stats.pkl --expect-sha "$SHA"
+            --dumps dh-dumps --out bm25_stats.pkl --expect-sha "$SHA"
+          # NOTE: fetch_pinned_dumps --dest is FLAT (dh-dumps/*.sql.gz);
+          # the dumps/ top-level prefix exists only inside the tarball.
       - uses: actions/upload-artifact@v4
         with:
           name: bm25-stats
@@ -254,7 +256,7 @@ jobs:
         run: |
           set -e
           tar -xzf dumps.tar.gz
-          N=$(find dh-dumps/dumps -name '*.sql.gz' | wc -l)
+          N=$(find dumps -name '*.sql.gz' | wc -l)
           test "$N" = "33" || { echo "FATAL: expected 33 dumps, found $N"; exit 1; }
       - name: Fetch + start pinned qdrant engine (localhost)
         if: steps.shard-cache.outputs.cache-hit != 'true'
@@ -329,7 +331,7 @@ jobs:
           mkdir -p shard-out
           python3 bootstrap/ingest_shard.py \
             --shard ${{ matrix.shard }} --shards 5 \
-            --dumps dh-dumps/dumps \
+            --dumps dumps \
             --bm25-stats bm25_stats.pkl \
             --out shard-out
       - uses: actions/upload-artifact@v4
