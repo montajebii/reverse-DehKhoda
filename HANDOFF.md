@@ -298,3 +298,45 @@ pinned e5 tokenizer (`tokenizer.json` sha256-verified, `max_seq_length`
 * Evidence scripts: `scripts/chunker_evidence.py`,
   `scripts/chunker_followup.py`, `scripts/postfix_global.py`
   (work dir `scripts/work/`).
+
+## 10. v1.3.1 known quality limitations
+
+The SAFEGUARD-2 merge probes (3 fixed Persian reverse-dictionary queries,
+run against the merged collection with the pinned
+`intfloat/multilingual-e5-base` encoder) pass all their hard gates
+(≥ 1 hybrid RRF hit, top dense cosine > 0.5, non-empty definition payload),
+but they expose a real semantic-quality issue in the dense channel.
+Observed in the 2026-10-31 full local dry-run (real shard artifacts, pinned
+qdrant `d60f8c31`, pinned model) and to be re-confirmed on the attempt-5
+merge job:
+
+| Probe (verbatim) | Top dense hit | Verdict |
+| --- | --- | --- |
+| «احساس بی‌قراری و اضطراب» (restlessness & anxiety) | «بی دغدغگی» (carefree) | OPPOSITE of the intended sense |
+| «حالت ترس و وحشت شدید» (intense fear & terror) | «ترسندگی» (timidity/fearfulness) | correct ✓ |
+| «کسی که بسیار سخاوتمند است» (someone very generous) | «افزون خواستن» (greedy) | OPPOSITE of the intended sense |
+
+Reading: this is an **encoder limitation, not a merge-pipeline bug**. The
+merge independently verifies counts (351,156), the chunk/truncation sums
+(384), per-shard sha256 and snapshot integrity; the probes prove the
+collection carries real, non-empty definitions. What e5-base's Persian
+space does not reliably separate is antonym pairs (carefree ↔ anxious,
+greedy ↔ generous): the query embedding lands nearer the antonym's vector
+than the synonym's, and the sparse channel does not rescue the dense top-1.
+**Do NOT change the model for v1.3.1** — that would require rebuilding the
+snapshot and break the pin contract (`prebuilt_index.snapshot_sha256`).
+Production exposure is mitigated by hybrid BM25 + RRF ranking; the dense
+top-1 alone is not the user-facing ordering.
+
+## 11. v1.3.2 candidates
+
+* Evaluate `BAAI/bge-m3` on the same 3 SAFEGUARD-2 probes; require 3/3
+  sense-correct top hits before considering a re-pin. (Note: pins.json
+  currently carries only `intfloat/multilingual-e5-base` — bge-m3 must be
+  added via `scripts/gen_pins.py` first.)
+* Hybrid weighting tuning — increase the sparse weight in the fusion mix
+  (lexical BM25 matching is unaffected by the antonym problem).
+* Consider a Persian-specific reranker on top-N results (cross-encoder
+  over the RRF top-24, re-rank before display).
+* Test with real users on real queries — collect per-query relevance
+  feedback on top-3 results before locking the v1.3.2 model choice.

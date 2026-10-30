@@ -14,7 +14,9 @@ recovery/collision semantics are not a merge primitive), so this driver:
   3. creates the production main collection via the REAL backend path
      (ensure_collection: dense 768 cosine + sparse IP + word index);
   4. scrolls each temp collection (with_vectors + with_payload) and upserts
-     into main in 5,000-point batches with a progress line per batch:
+     into main in DEHKHODA_MERGE_BATCH-sized batches (default 1,000 points —
+     Qdrant's 32MiB JSON payload limit rejects ~57MB 5,000-point batches)
+     with a progress line per batch:
          {"shard": i, "batch": j, "total_upserted": X, "total_target": 351156}
      per-shard cumulative assert; 60-min soft timeout -> WARNING + continue,
      90-min hard timeout -> FAIL ("something is wrong") — SAFEGUARD 4;
@@ -40,6 +42,7 @@ import argparse
 import gzip
 import hashlib
 import json
+import os
 import shutil
 import sys
 import time
@@ -55,7 +58,10 @@ USABLE_ROWS = 312_506
 EXPECTED_TOTAL_ROWS = 312_506
 EXPECTED_TOTAL_CHUNKS = 351_156   # the canary: fixed chunker on the full corpus
 EXPECTED_TOTAL_TRUNCATIONS = 384
-UPSERT_BATCH = 5_000              # SAFEGUARD 4 batch size
+# SAFEGUARD 4 batch size. 5000 points × ~11.4KB/point ≈ 57MB > Qdrant's
+# 32MB JSON payload limit (HTTP 400 — attempts 1-4 root cause). 1000 ≈ ~14MB.
+BATCH = int(os.environ.get("DEHKHODA_MERGE_BATCH", "1000"))
+assert BATCH > 0 and BATCH <= 5000, f"DEHKHODA_MERGE_BATCH out of range: {BATCH}"
 SOFT_TIMEOUT_S = 60 * 60          # WARNING, keep going
 HARD_TIMEOUT_S = 90 * 60          # FAIL — something is wrong
 N_SHARDS = 5
@@ -212,7 +218,7 @@ def merge_shard(client, tmp_name: str, main_name: str, shard_idx: int,
     upserted = 0
     warned_soft = False
     last_page_first_id = None
-    max_batches = (expected // UPSERT_BATCH) * 3 + 20  # stall guard
+    max_batches = (expected // BATCH) * 3 + 20  # stall guard
     while True:
         elapsed = time.time() - deadline0
         if elapsed > HARD_TIMEOUT_S:
@@ -229,7 +235,7 @@ def merge_shard(client, tmp_name: str, main_name: str, shard_idx: int,
                 f"batches for {expected} points — no forward progress; FAIL")
         points, offset = client.scroll(
             collection_name=tmp_name,
-            limit=UPSERT_BATCH,
+            limit=BATCH,
             offset=offset,
             with_vectors=True,
             with_payload=True,
@@ -256,9 +262,27 @@ def merge_shard(client, tmp_name: str, main_name: str, shard_idx: int,
             batch.append(models.PointStruct(
                 id=p.id, vector={"dense": list(dense), "sparse": sparse},
                 payload=p.payload))
-        client.upsert(main_name, points=batch, wait=True)
+        # defensive: measure the would-be REST JSON payload size so a 32MiB
+        # rejection shows up in the log as bytes, not as a bare HTTP 400
+        nbytes = sum(len(json.dumps(
+            {"id": p.id, "payload": p.payload,
+             "vector": {"dense": list(p.vector["dense"]),
+                        "sparse": {"indices": list(p.vector["sparse"].indices),
+                                   "values": list(p.vector["sparse"].values)}}},
+            ensure_ascii=False).encode("utf-8")) for p in batch)
+        try:
+            client.upsert(main_name, points=batch, wait=True)
+        except Exception as e:
+            print(f"::error::MERGE-UPSERT-FAIL shard={shard_idx} "
+                  f"batch={batch_no + 1} points={len(batch)} bytes={nbytes} "
+                  f"first_id={points[0].id} err={type(e).__name__}: {e}",
+                  flush=True)
+            die(f"upsert failed on shard {shard_idx} batch {batch_no + 1} "
+                f"({len(batch)} points, {nbytes} bytes): {e}")
         batch_no += 1
         upserted += len(batch)
+        print(f"::notice::MERGE-UPSERT shard={shard_idx} batch={batch_no} "
+              f"points={len(batch)} bytes={nbytes}", flush=True)
         print(f"MERGE-PROGRESS {{\"shard\": {shard_idx}, \"batch\": {batch_no}, "
               f"\"total_upserted\": {upserted}, \"total_target\": "
               f"{EXPECTED_TOTAL_CHUNKS}}}", flush=True)
@@ -466,7 +490,7 @@ def main() -> int:
         i = r["shard"]
         n = merge_shard(client, f"shard_{i}", main_name, i, r["chunks"], upsert_t0)
         total_upserted += n
-        print(f"MERGE-SHARD-DONE {{\"shard\": {i}, \"upserted\": {n}, "
+        print(f"::notice::MERGE-SHARD-DONE {{\"shard\": {i}, \"upserted\": {n}, "
               f"\"cumulative\": {total_upserted}, \"target\": "
               f"{EXPECTED_TOTAL_CHUNKS}}}", flush=True)
 
@@ -483,7 +507,14 @@ def main() -> int:
                        stats_path=s.resolved_data_dir() / "bm25_stats.pkl")
     if not bm25.load():
         die("bm25.load() failed in merge — probes need the pinned stats")
-    probe_results = run_probes(client, main_name, embedder, bm25, analyzer)
+    try:
+        probe_results = run_probes(client, main_name, embedder, bm25, analyzer)
+    except SystemExit:
+        raise
+    except Exception as e:
+        print(f"::error::MERGE-PROBE-FAIL err={type(e).__name__}: {e}",
+              flush=True)
+        die(f"probes crashed before completing SAFEGUARD 2: {e}")
 
     # ---- 6. final snapshot + meta ------------------------------------------
     meta = take_final_snapshot(client, main_name, args.out, bm25_sha,
