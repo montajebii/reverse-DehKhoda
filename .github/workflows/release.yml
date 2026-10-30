@@ -4,6 +4,15 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      skip_ingest:
+        description: "Skip the 5 ingest-shard jobs; merge reuses shard-snapshot-* artifacts from a previous run"
+        type: boolean
+        default: false
+      source_run_id:
+        description: "Run ID owning the shard-snapshot-* artifacts (REQUIRED when skip_ingest=true)"
+        type: string
+        default: ""
 
 permissions:
   contents: write
@@ -180,6 +189,9 @@ jobs:
     name: ingest-shard (${{ matrix.shard }} of 5)
     runs-on: ubuntu-latest
     needs: [model-cache, bm25-stats]
+    # push/tag runs: inputs.skip_ingest is null -> null != true -> jobs run.
+    # dispatch with skip_ingest=true: the 4-5h shard work never re-executes.
+    if: ${{ inputs.skip_ingest != true }}
     timeout-minutes: 330
     strategy:
       fail-fast: false
@@ -356,14 +368,41 @@ jobs:
     name: merge shards -> final snapshot (probes + pin)
     runs-on: ubuntu-latest
     needs: [bm25-stats, ingest-shard]
+    # skip_ingest dispatch: the shard jobs are SKIPPED on purpose; the merge
+    # still runs and reuses the 5 shard-snapshot-* artifacts from
+    # source_run_id (merge_index.py re-verifies every artifact sha256
+    # against its shard report, so reuse is integrity-gated).
+    if: ${{ !cancelled() && needs.bm25-stats.result == 'success' && (needs.ingest-shard.result == 'success' || inputs.skip_ingest == true) }}
+    # job-level permissions REPLACE the workflow-level set: GITHUB_TOKEN
+    # needs actions:write (upload artifact) which includes read (download
+    # shard-snapshot-* from ANOTHER run), contents:read (checkout).
+    permissions:
+      actions: write
+      contents: read
     timeout-minutes: 170
     steps:
       - uses: actions/checkout@v4
+      - name: Guard - skip_ingest requires source_run_id
+        if: ${{ inputs.skip_ingest == true && inputs.source_run_id == '' }}
+        run: |
+          echo "FATAL: skip_ingest=true requires the workflow_dispatch input"
+          echo "source_run_id (the run that owns the shard-snapshot-* artifacts)."
+          exit 1
       - uses: actions/download-artifact@v4
+        if: ${{ inputs.skip_ingest != true }}
         with:
           pattern: shard-snapshot-*
           path: shard-artifacts
           merge-multiple: true
+      - name: Reuse shard artifacts from run ${{ inputs.source_run_id }} (skip_ingest=true)
+        if: ${{ inputs.skip_ingest == true }}
+        uses: actions/download-artifact@v4
+        with:
+          pattern: shard-snapshot-*
+          path: shard-artifacts
+          merge-multiple: true
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/download-artifact@v4
         with:
           name: bm25-stats
@@ -450,9 +489,9 @@ jobs:
           Path("engine/qdrant").chmod(0o755)
           print("qdrant engine ready:", pins["version"])
           PY
-          mkdir -p dh-merge/qdrant-server
+          mkdir -p "${{ github.workspace }}/dh-merge/qdrant-server"
           QDRANT__SERVICE__HTTP_PORT=6333 QDRANT__SERVICE__HOST=127.0.0.1 \
-            QDRANT__STORAGE__STORAGE_PATH="$PWD/dh-merge/qdrant-server" \
+            QDRANT__STORAGE__STORAGE_PATH="${{ github.workspace }}/dh-merge/qdrant-server" \
             QDRANT__TELEMETRY_DISABLED=true \
             nohup ./engine/qdrant > qdrant-merge.log 2>&1 &
           for i in $(seq 1 120); do
@@ -464,10 +503,18 @@ jobs:
       - name: Seed model (probes embed queries)
         if: steps.merge-cache.outputs.cache-hit != 'true'
         env:
-          DEHKHODA_DATA_DIR: "$PWD/dh-merge"
+          # RUN-#35 ROOT CAUSE: GitHub env: values are NOT shell-expanded —
+          # "$PWD/dh-merge" stayed the literal string and tar -C hit the
+          # never-created literal dir -> GNU tar fatal -> exit 2 at 1m52s.
+          # ${{ github.workspace }} IS expanded by the runner before bash.
+          DEHKHODA_DATA_DIR: "${{ github.workspace }}/dh-merge"
         run: |
           set -e
+          mkdir -p "$DEHKHODA_DATA_DIR"
           tar -xzf model-e5.tar.gz -C "$DEHKHODA_DATA_DIR"
+          # SAFEGUARD 2 probes load data_dir/bm25_stats.pkl (commit-5 runtime
+          # contract) — stage the pinned stats next to the seeded model.
+          cp bm25_stats.pkl "$DEHKHODA_DATA_DIR/bm25_stats.pkl"
           python3 - <<'PY'
           import sys
           sys.path.insert(0, ".")
@@ -487,8 +534,10 @@ jobs:
       - name: Merge shards -> SAFEGUARD asserts -> probes -> final snapshot
         if: steps.merge-cache.outputs.cache-hit != 'true'
         env:
-          DEHKHODA_DATA_DIR: "$PWD/dh-merge"
-          DEHKHODA_QDRANT_STORAGE: "$PWD/dh-merge/qdrant-server"
+          DEHKHODA_DATA_DIR: "${{ github.workspace }}/dh-merge"
+          # must equal the server's STORAGE_PATH below, or recover_snapshot
+          # dies with file://-outside-server-storage (latent run-#35 bug #2)
+          DEHKHODA_QDRANT_STORAGE: "${{ github.workspace }}/dh-merge/qdrant-server"
           DEHKHODA_BACKEND: "qdrant"
           DEHKHODA_QDRANT_MODE: "server"
           DEHKHODA_QDRANT_URL: "http://127.0.0.1:6333"
@@ -589,12 +638,14 @@ jobs:
         env:
           DEHKHODA_BUNDLE_PROFILE: full
           DEHKHODA_VARIANTS: "full lean"
-          DEHKHODA_MODEL_TARBALL: "$PWD/model-e5.tar.gz"
+          # ${{ github.workspace }} (runner-expanded) — literal $PWD env
+          # values never resolve (latent run-#35 bug #3, packaging class)
+          DEHKHODA_MODEL_TARBALL: "${{ github.workspace }}/model-e5.tar.gz"
           # v1.3.1: dataset + prebuilt index bundle (full variant only)
-          DEHKHODA_DATASET_TARBALL: "$PWD/dumps.tar.gz"
-          DEHKHODA_INDEX_SNAPSHOT: "$PWD/dehkhoda.snapshot.gz"
+          DEHKHODA_DATASET_TARBALL: "${{ github.workspace }}/dumps.tar.gz"
+          DEHKHODA_INDEX_SNAPSHOT: "${{ github.workspace }}/dehkhoda.snapshot.gz"
           # v1.3.1 Option C: corpus-wide BM25 stats ride in the same artifact
-          DEHKHODA_BM25_STATS: "$PWD/bm25_stats.pkl"
+          DEHKHODA_BM25_STATS: "${{ github.workspace }}/bm25_stats.pkl"
           # no /dev/fuse anywhere on CI — extract-and-run sidesteps FUSE for
           # the AppImage-based bundler tools (linuxdeploy, appimagetool)
           APPIMAGE_EXTRACT_AND_RUN: "1"
