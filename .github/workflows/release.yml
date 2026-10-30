@@ -403,6 +403,58 @@ jobs:
           merge-multiple: true
           run-id: ${{ inputs.source_run_id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: List shard-artifacts (diagnostic)
+        run: |
+          set -e
+          echo "=== shard-artifacts tree ==="
+          find shard-artifacts -maxdepth 2 -type f -printf '%P\t%s bytes\n' | sort
+          echo "=== expected files (flat after merge-multiple) ==="
+          missing=0
+          for i in 0 1 2 3 4; do
+            if [ -f "shard-artifacts/shard_report_$i.json" ]; then
+              echo "shard_report_$i.json: OK"
+            else
+              echo "shard_report_$i.json: MISSING"; missing=1
+            fi
+            if [ -f "shard-artifacts/shard_$i.snapshot.gz" ]; then
+              echo "shard_$i.snapshot.gz: OK"
+            else
+              echo "shard_$i.snapshot.gz: MISSING"; missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::flat shard-artifacts layout incomplete — download did not flatten (see tree above)"
+            exit 1
+          fi
+          echo "=== SAFEGUARD-3 pre-check: real report sums ==="
+          python3 - <<'PY'
+          import json, sys
+          rows = chunks = truncs = 0
+          per = []
+          for i in range(5):
+              r = json.load(open(f"shard-artifacts/shard_report_{i}.json"))
+              rows += r["rows_count"]; chunks += r["chunks"]; truncs += r["known_truncations"]
+              per.append((r["shard"], r["start_row"], r["end_row"], r["rows_count"],
+                          r["chunks"], r["known_truncations"]))
+          for p in per:
+              print(f"shard {p[0]}: rows[{p[1]}..{p[2]}) = {p[3]}, chunks = {p[4]}, truncations = {p[5]}")
+          print(f"SUM rows={rows} (expect 312506) chunks={chunks} (expect 351156) truncations={truncs} (expect 384)")
+          bad = []
+          if rows != 312506: bad.append(f"sum(rows_count)={rows} != 312506")
+          if chunks != 351156: bad.append(f"sum(chunks)={chunks} != 351156 (chunker canary drift)")
+          if truncs != 384: bad.append(f"sum(known_truncations)={truncs} != 384")
+          pos = 0
+          for p in per:
+              if p[1] != pos: bad.append(f"partition gap/overlap at shard {p[0]}: start {p[1]} != expected {pos}")
+              pos = p[2]
+          if pos != 312506: bad.append(f"partition end {pos} != 312506")
+          if bad:
+              for b in bad:
+                  print(f"::error::SAFEGUARD-3 pre-check: {b}")
+              sys.exit(1)
+          print("::notice::SAFEGUARD-3 pre-check OK: rows=312506 chunks=351156 truncations=384")
+          print("FLATTEN-CHECK OK: 10/10 files flat + report sums match expectations")
+          PY
       - uses: actions/download-artifact@v4
         with:
           name: bm25-stats
