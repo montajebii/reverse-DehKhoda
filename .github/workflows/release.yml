@@ -541,9 +541,10 @@ jobs:
           Path("engine/qdrant").chmod(0o755)
           print("qdrant engine ready:", pins["version"])
           PY
-          mkdir -p "${{ github.workspace }}/dh-merge/qdrant-server"
+          mkdir -p "${{ github.workspace }}/dh-merge/qdrant-server/snapshots"
           QDRANT__SERVICE__HTTP_PORT=6333 QDRANT__SERVICE__HOST=127.0.0.1 \
             QDRANT__STORAGE__STORAGE_PATH="${{ github.workspace }}/dh-merge/qdrant-server" \
+            QDRANT__STORAGE__SNAPSHOTS_PATH="${{ github.workspace }}/dh-merge/qdrant-server/snapshots" \
             QDRANT__TELEMETRY_DISABLED=true \
             nohup ./engine/qdrant > qdrant-merge.log 2>&1 &
           for i in $(seq 1 120); do
@@ -587,8 +588,13 @@ jobs:
         if: steps.merge-cache.outputs.cache-hit != 'true'
         env:
           DEHKHODA_DATA_DIR: "${{ github.workspace }}/dh-merge"
-          # must equal the server's STORAGE_PATH below, or recover_snapshot
-          # dies with file://-outside-server-storage (latent run-#35 bug #2)
+          # must equal the server's STORAGE_PATH below, and the server's
+          # SNAPSHOTS_PATH must equal $STORAGE/snapshots — qdrant does NOT
+          # derive snapshots_path from storage_path (its default is the
+          # CWD-relative ./snapshots). Run-41091732914 merge died at
+          # recover_snapshot with 403 "Snapshot file path must be inside the
+          # snapshots directory \"<workspace>/snapshots\"". Same convention as
+          # bootstrap/backend_launcher.py (the end-user sidecar launcher).
           DEHKHODA_QDRANT_STORAGE: "${{ github.workspace }}/dh-merge/qdrant-server"
           DEHKHODA_BACKEND: "qdrant"
           DEHKHODA_QDRANT_MODE: "server"
