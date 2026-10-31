@@ -484,8 +484,21 @@ jobs:
             merge-out/prebuilt_index_meta.json
             merge-out/merge_report.json
           key: ${{ steps.mergekey.outputs.key }}
+      - id: acquire
+        name: Acquire pinned snapshot (cache -> source_run artifact -> rebuild)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          # Option A: Qdrant snapshot containers embed a runtime collection UUID
+          # + timestamps -> re-merging identical shards yields DIFFERENT bytes
+          # every run (run 41178302834 MERGE-FATAL: 0ebf98a7… != pin 1718d119…).
+          # Convergence requires REUSE: actions/cache restore above, else the
+          # pinned source_run artifact, else a legit rebuild (pin-bump event).
+          python3 -m bootstrap.merge_index acquire \
+            --pins bootstrap/pins.json --out merge-out
       - name: Cached merge -> verify + re-upload artifacts
-        if: steps.merge-cache.outputs.cache-hit == 'true'
+        if: steps.acquire.outputs.snapshot_source != 'rebuild'
         run: |
           set -e
           test -f merge-out/dehkhoda.snapshot.gz
@@ -505,7 +518,7 @@ jobs:
           print("cached merge verified: record_count", meta["record_count"], h[:12])
           PY
       - uses: actions/upload-artifact@v4
-        if: steps.merge-cache.outputs.cache-hit == 'true'
+        if: steps.acquire.outputs.snapshot_source != 'rebuild'
         with:
           name: index-snapshot
           path: |
@@ -515,13 +528,13 @@ jobs:
             merge-out/merge_report.json
           retention-days: 14
       - name: Install Python deps (probe embedder needs torch)
-        if: steps.merge-cache.outputs.cache-hit != 'true'
+        if: steps.acquire.outputs.snapshot_source == 'rebuild'
         run: |
           python3 -m pip install --upgrade pip
           python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
           python3 -m pip install -r backend/requirements.txt
       - name: Fetch + start pinned qdrant engine (localhost)
-        if: steps.merge-cache.outputs.cache-hit != 'true'
+        if: steps.acquire.outputs.snapshot_source == 'rebuild'
         run: |
           set -e
           mkdir -p engine
@@ -554,7 +567,7 @@ jobs:
           curl -fsS http://127.0.0.1:6333/readyz
           echo "qdrant ready on 127.0.0.1:6333"
       - name: Seed model (probes embed queries)
-        if: steps.merge-cache.outputs.cache-hit != 'true'
+        if: steps.acquire.outputs.snapshot_source == 'rebuild'
         env:
           # RUN-#35 ROOT CAUSE: GitHub env: values are NOT shell-expanded —
           # "$PWD/dh-merge" stayed the literal string and tar -C hit the
@@ -585,7 +598,7 @@ jobs:
           print("state seeded:", rev)
           PY
       - name: Merge shards -> SAFEGUARD asserts -> probes -> final snapshot
-        if: steps.merge-cache.outputs.cache-hit != 'true'
+        if: steps.acquire.outputs.snapshot_source == 'rebuild'
         env:
           DEHKHODA_DATA_DIR: "${{ github.workspace }}/dh-merge"
           # must equal the server's STORAGE_PATH below, and the server's
@@ -610,7 +623,7 @@ jobs:
             --bm25-stats bm25_stats.pkl \
             --out merge-out
       - name: Assert index-snapshot artifact contains bm25_stats.pkl
-        if: steps.merge-cache.outputs.cache-hit != 'true'
+        if: steps.acquire.outputs.snapshot_source == 'rebuild'
         run: |
           set -e
           cp bm25_stats.pkl merge-out/bm25_stats.pkl
@@ -625,7 +638,7 @@ jobs:
           print("index-snapshot artifact contains bm25_stats.pkl (sha256 pinned OK)")
           PY
       - uses: actions/upload-artifact@v4
-        if: steps.merge-cache.outputs.cache-hit != 'true'
+        if: steps.acquire.outputs.snapshot_source == 'rebuild'
         with:
           name: index-snapshot
           path: |

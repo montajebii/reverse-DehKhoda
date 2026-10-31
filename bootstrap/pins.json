@@ -265,6 +265,10 @@
   "$comment_record_count": "record_count is the Qdrant collection points_count of the BUILT snapshot (filled by CI from the restored collection), NOT the source row count of the Dehkhoda SQL dump. Source-row integrity (USABLE_ROWS=312506) is asserted upstream in build-index-snapshot BEFORE the snapshot is created, so the snapshot is guaranteed to contain every usable row; the acceptance test then only verifies the snapshot restores fully (points_count == record_count).",
   "snapshot_sha256": "1718d119594827ff9b9d20b3ac671cbe4acc0d4cb10c3607133fe0168cbf01a4",
   "snapshot_size_bytes": 1240174914,
-  "built_at": "2026-10-30T23:27:00+00:00"
+  "built_at": "2026-10-30T23:27:00+00:00",
+  "$comment_source": "Option A (run 41178302834 root cause): Qdrant snapshot containers embed a runtime collection UUID + timestamps, so re-merging identical shard data yields DIFFERENT archive bytes every run. snapshot_sha256 pins the EXACT BYTES we ship; convergence requires REUSE (actions/cache or the source_run artifact below), never REBUILD. Rebuild only on a real data change (model, chunker, corpus) = pin-bump event with a new r<N> cache key, not a retry.",
+  "source_run": 41143446238,
+  "source_artifact": "index-snapshot",
+  "source_artifact_expires": "2026-11-13"
  }
 }

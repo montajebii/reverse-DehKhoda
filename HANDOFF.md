@@ -340,3 +340,48 @@ top-1 alone is not the user-facing ordering.
   over the RRF top-24, re-rank before display).
 * Test with real users on real queries — collect per-query relevance
   feedback on top-3 results before locking the v1.3.2 model choice.
+
+## 12. Why Qdrant snapshot shas are non-deterministic (v1.3.1 release-train root cause)
+
+Qdrant snapshot containers embed a **runtime collection UUID and timestamps**
+(observe the snapshot filename itself: `dehkhoda-1262086191253432-2026-10-31-07-01-41-0.snapshot` — the number is per-instance entropy). Therefore:
+
+* **Byte-identity CANNOT be reproduced by re-merging from the same shards.**
+  Proof: run 41143446238 (attempt 5) -> `1718d119…` (1,240,174,914 B); run
+  41178302834 -> `0ebf98a7…` (1,241,479,202 B). Identical data — same
+  record_count (351,156), same known_truncations (384), probe dense top scores
+  identical to every printed digit ([0.8556328, 0.8596259, 0.85398567]) —
+  different container bytes (+1,304,288 B of UUID/timestamp entropy).
+* **The pin's semantic is: "the EXACT BYTES of this specific file we ship"**
+  (`prebuilt_index.snapshot_sha256` is a byte-level contract, not a data-level
+  one).
+* **Convergence requires REUSE, not REBUILD.** The acquire order is:
+  actions/cache restore (tag-scope cache) -> download the pinned
+  `source_run` artifact (`prebuilt_index.source_run` = 41143446238,
+  `source_artifact` = index-snapshot) -> rebuild.
+* **Rebuild only happens when the underlying data changes** (model, chunker,
+  corpus). That is a **pin-bump event** (new bytes, re-run PIN-FILL, new
+  `snapshot_sha256`, bump the cache `r<N>` key) — **not a retry event**.
+  Retrying a rebuild against a byte-exact pin can never converge.
+
+Release-train history that lead here (v1.3.1):
+
+| Run | Trigger | Outcome |
+| --- | --- | --- |
+| 41148366899 (#40) | tag v1.3.1 @ 6e44d70 | 5× ingest-shard cache HIT then died in the cached-shard verify heredoc: `shard_out/` vs `shard-out/` filename typo (release.yml lines 241-242). Fixed in 396ca0e. |
+| 41178302834 (#41) | tag v1.3.1 @ 396ca0e | Typo fix validated (5/5 shards cache HIT + verified). merge-index: merge cache MISS (cache scoped to `ci/merge-seed-fix`, invisible to tag runs — key string byte-identical, no drift) -> real merge -> data identical, container bytes `0ebf98a7…` != pin `1718d119…` -> MERGE-FATAL (SAFEGUARD worked as designed). |
+| fix (this commit) | — | Option A: `bootstrap/merge_index.py` gains `acquire_snapshot()` (`acquire` CLI: cache-hit -> source_run artifact download -> rebuild signal, with SNAPSHOT-IDENTITY-FAIL data checks: record_count, known_truncations, 3 probe scores ±0.01); release.yml merge-index job gains the "Acquire pinned snapshot" step and re-gates cached/rebuild steps on `steps.acquire.outputs.snapshot_source`; pins.json prebuilt_index gains `source_run`/`source_artifact`/`source_artifact_expires` provenance. |
+
+### v1.3.1 post-release action (do NOT do during the release train)
+
+After v1.3.1 ships, upload the snapshot bytes from run 41143446238 to the
+v1.3.1 release page as a permanent asset named
+`dehkhoda-snapshot-v1.3.1.snapshot.gz` (sha256 `1718d119…`). The workflow
+artifact it currently lives in expires 2026-11-13; the release asset does not.
+Future patch releases must not depend on workflow artifact retention.
+
+### Known limitation, not fixed in this release (non-gating)
+
+`ci.yml` Tauri build failures are a separate non-gating workflow. Documented
+here as a known limitation; NOT fixed in the v1.3.1 release train (which
+touches release.yml only). Does not block v1.3.1 shipping.

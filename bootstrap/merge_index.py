@@ -46,7 +46,9 @@ import os
 import shutil
 import sys
 import time
+import urllib.error
 import urllib.request
+import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -434,6 +436,197 @@ def take_final_snapshot(client, collection: str, out_dir: Path,
     return meta
 
 
+# ---------------------------------------------------------------------------
+# Option A — snapshot ACQUISITION (byte-exact REUSE, not rebuild).
+#
+# Root cause (run 41178302834 MERGE-FATAL): Qdrant snapshot containers embed a
+# runtime collection UUID and timestamps, so re-merging IDENTICAL shard data
+# produces DIFFERENT archive bytes on every run (run 41143446238 -> 1718d119…,
+# run 41178302834 -> 0ebf98a7…; same record_count/truncations/probe scores,
+# container +1,304,288 bytes of entropy). The pin's semantic is therefore
+# "the EXACT BYTES of the file we ship" — convergence requires REUSE, never
+# REBUILD. A rebuild is only legitimate when the underlying data changes
+# (model, chunker, corpus): a pin-bump event (new cache r<N> key), not a retry.
+
+SNAPSHOT_PROBE_REFERENCE = [0.8556, 0.8596, 0.8540]  # pinned dense top scores
+SNAPSHOT_PROBE_TOLERANCE = 0.01
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Opener that surfaces 3xx as HTTPError so we can read Location and
+    re-request WITHOUT forwarding Authorization to the signed blob URL."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _api_get(url: str, token: str, timeout: int = 120):
+    """GET with auth; returns (status, headers, body). No redirect follow."""
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "dehkhoda-merge-index/1.1",
+    })
+    try:
+        with urllib.request.build_opener(_NoRedirect).open(req, timeout=timeout) as r:
+            return r.status, r.headers, r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.headers, e.read()
+
+
+def _identity_check(meta: dict, report: dict | None, pin: dict) -> None:
+    """Fast data-identity assertion on an ACQUIRED snapshot (no engine needed).
+
+    Re-verifies the data fields the SAFEGUARDs computed when the snapshot was
+    built: record_count, known_truncations, and the 3 SAFEGUARD-2 probe dense
+    top scores. Byte-identity (sha256 == pin) is asserted by the caller.
+    """
+    bad = []
+    if meta.get("record_count") != pin.get("record_count"):
+        bad.append(f"record_count={meta.get('record_count')} "
+                   f"expected {pin.get('record_count')}")
+    if meta.get("known_truncations") != pin.get("known_truncations"):
+        bad.append(f"known_truncations={meta.get('known_truncations')} "
+                   f"expected {pin.get('known_truncations')}")
+    scores = (report or {}).get("probe_top_scores") or []
+    if len(scores) != len(SNAPSHOT_PROBE_REFERENCE):
+        bad.append(f"probe_top_scores={scores} expected "
+                   f"{len(SNAPSHOT_PROBE_REFERENCE)} scores near "
+                   f"{SNAPSHOT_PROBE_REFERENCE}")
+    else:
+        for i, (got, want) in enumerate(zip(scores, SNAPSHOT_PROBE_REFERENCE)):
+            if abs(float(got) - want) > SNAPSHOT_PROBE_TOLERANCE:
+                bad.append(f"probe_score[{i}]={got} expected {want} "
+                           f"(+-{SNAPSHOT_PROBE_TOLERANCE})")
+    if bad:
+        for b in bad:
+            print(f"::error::SNAPSHOT-IDENTITY-FAIL: {b}", flush=True)
+        die("SNAPSHOT-IDENTITY-FAIL: " + "; ".join(bad))
+
+
+def _emit_snapshot_source(src: str) -> None:
+    gh = os.environ.get("GITHUB_OUTPUT")
+    if gh:
+        with open(gh, "a", encoding="utf-8") as f:
+            f.write(f"snapshot_source={src}\n")
+
+
+def _download_snapshot_artifact(pin: dict, out_dir: Path, token: str) -> None:
+    """Download the pinned source artifact (index-snapshot) from the source
+    run and unpack its files flat into out_dir (zip-slip safe)."""
+    name = pin.get("source_artifact") or "index-snapshot"
+    run_id = int(pin["source_run"])
+    if not token:
+        die(f"SNAPSHOT-SOURCE needs a token (GITHUB_TOKEN) to download "
+            f"artifact {name} from run {run_id}")
+    repo = os.environ.get("GITHUB_REPOSITORY", "montajebii/reverse-DehKhoda")
+    list_url = (f"https://api.github.com/repos/{repo}"
+                f"/actions/runs/{run_id}/artifacts?per_page=100")
+    st, _h, body = _api_get(list_url, token)
+    if st != 200:
+        die(f"artifact list for run {run_id} -> HTTP {st}: {body[:200]!r}")
+    arts = json.loads(body).get("artifacts", [])
+    hit = next((a for a in arts
+                if a["name"] == name and not a.get("expired")), None)
+    if hit is None:
+        die(f"artifact {name!r} not found unexpired on run {run_id}; "
+            f"got {[a['name'] for a in arts]}")
+    print(f"SNAPSHOT-SOURCE: downloading artifact {name} "
+          f"(id={hit['id']}, {hit['size_in_bytes'] / 1e6:.1f} MB) "
+          f"from run {run_id}", flush=True)
+    zip_url = f"https://api.github.com/repos/{repo}/actions/artifacts/{hit['id']}/zip"
+    st, headers, body = _api_get(zip_url, token, timeout=120)
+    if st not in (301, 302, 303, 307):
+        die(f"artifact zip request -> HTTP {st} (expected redirect): {body[:200]!r}")
+    loc = headers.get("Location")
+    if not loc:
+        die("artifact zip redirect has no Location header")
+    ztmp = out_dir / ".index-snapshot.zip"
+    # signed blob URL: NO auth header (urllib forwards it on auto-redirect)
+    with urllib.request.urlopen(loc, timeout=1800) as r, open(ztmp, "wb") as f:
+        shutil.copyfileobj(r, f)
+    with zipfile.ZipFile(ztmp) as zf:
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            with zf.open(info) as src, open(out_dir / Path(info.filename).name, "wb") as f:
+                shutil.copyfileobj(src, f)
+    ztmp.unlink()
+    print(f"SNAPSHOT-SOURCE: unpacked {[p.name for p in sorted(out_dir.iterdir())]}",
+          flush=True)
+
+
+def acquire_snapshot(pins_root: dict, out_dir: Path, token: str = "") -> str:
+    """Materialize the byte-exact pinned snapshot in out_dir (Option A).
+
+    Order: (1) actions/cache restore of out_dir (caller restores before this
+    runs) -> cache-hit; (2) download the pinned source_run artifact;
+    (3) nothing reusable -> signal REBUILD (caller runs the full merge path).
+    Returns "cache" | "download" | "rebuild". For cache/download the snapshot
+    sha256 == prebuilt_index.snapshot_sha256 AND the data-identity fields
+    (record_count / known_truncations / probe top scores) are asserted before
+    returning. Emits SNAPSHOT-SOURCE notices + GITHUB_OUTPUT.snapshot_source.
+    """
+    pin = pins_root["prebuilt_index"]
+    out_dir.mkdir(parents=True, exist_ok=True)
+    snap = out_dir / "dehkhoda.snapshot.gz"
+    want = str(pin.get("snapshot_sha256") or "")
+
+    def _load_meta_report():
+        meta = json.loads((out_dir / "prebuilt_index_meta.json")
+                          .read_text(encoding="utf-8"))
+        rp = out_dir / "merge_report.json"
+        report = (json.loads(rp.read_text(encoding="utf-8"))
+                  if rp.exists() else None)
+        return meta, report
+
+    # 1) cache-hit: actions/cache restored out_dir before this ran
+    if want and snap.exists():
+        got = sha256_file(snap)
+        if got == want:
+            meta, report = _load_meta_report()
+            _identity_check(meta, report, pin)
+            print(f"::notice::SNAPSHOT-SOURCE: cache-hit sha={got}", flush=True)
+            _emit_snapshot_source("cache")
+            return "cache"
+
+    # 2) byte-exact reuse from the pinned source run's artifact
+    if want and pin.get("source_run"):
+        _download_snapshot_artifact(pin, out_dir, token)
+        got = sha256_file(snap)
+        if got != want:
+            print(f"::error::SNAPSHOT-IDENTITY-FAIL: snapshot_sha256={got} "
+                  f"expected {want}", flush=True)
+            die(f"SNAPSHOT-IDENTITY-FAIL: downloaded snapshot sha256 {got} "
+                f"!= pin {want} (source artifact bytes drifted — refuse)")
+        meta, report = _load_meta_report()
+        _identity_check(meta, report, pin)
+        print(f"::notice::SNAPSHOT-SOURCE: downloaded from run "
+              f"{pin['source_run']} sha={got}", flush=True)
+        _emit_snapshot_source("download")
+        return "download"
+
+    # 3) nothing reusable — caller rebuilds via the full merge path
+    print("::notice::SNAPSHOT-SOURCE: rebuilding (no reusable pin)", flush=True)
+    _emit_snapshot_source("rebuild")
+    return "rebuild"
+
+
+def acquire_cli(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(
+        prog="merge_index acquire",
+        description="Materialize the pinned prebuilt snapshot: actions/cache "
+                    "restore -> source_run artifact download -> rebuild signal.")
+    ap.add_argument("--pins", required=True, type=Path)
+    ap.add_argument("--out", required=True, type=Path)
+    args = ap.parse_args(argv)
+    pins_root = json.loads(args.pins.read_text(encoding="utf-8"))
+    token = (os.environ.get("GITHUB_TOKEN") or os.environ.get("GITHUB_PAT")
+             or os.environ.get("PAT") or "")
+    acquire_snapshot(pins_root, args.out, token)
+    return 0
+
+
 def main() -> int:
     from bootstrap.model_fetcher import load_pins
 
@@ -546,4 +739,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "acquire":
+        raise SystemExit(acquire_cli(sys.argv[2:]))
     raise SystemExit(main())
