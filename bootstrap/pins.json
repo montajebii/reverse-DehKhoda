@@ -259,12 +259,12 @@
   "dense_dim": 768,
   "distance": "Cosine",
   "sparse_metric": "IP",
-  "record_count": 0,
+  "record_count": 351156,
   "known_truncations": 384,
   "$comment_known_truncations": "Chunks whose pre-embedding text exceeds the e5 model's 512-token max_seq_length (sentence_bert_config.json) and whose dense vector therefore covers only the first ~510 content tokens (sentence-transformers truncates silently). 384 of 351,156 chunks (0.109%) after the v1.3.1 chunker fix (else-branch hard-split, commit 'fix(chunker): hard-split oversized cur in the else branch'): all are <=1200 chars, worst 845 tokens — caused by vocalized Arabic vocabulary (harakat tokenize as separate XLM-R tokens, down to 0.71 chars/token), which the locked char-based chunking contract (chunk_chars=1200) cannot bound. NOT data loss: the BM25 sparse vector and the stored payload always cover the FULL chunk text, so lexical/RRF retrieval and displayed definitions are complete; only the dense side of these 384 chunks is partial. Token-aware chunking is the v1.3.2 follow-up.",
   "$comment_record_count": "record_count is the Qdrant collection points_count of the BUILT snapshot (filled by CI from the restored collection), NOT the source row count of the Dehkhoda SQL dump. Source-row integrity (USABLE_ROWS=312506) is asserted upstream in build-index-snapshot BEFORE the snapshot is created, so the snapshot is guaranteed to contain every usable row; the acceptance test then only verifies the snapshot restores fully (points_count == record_count).",
-  "snapshot_sha256": "",
-  "snapshot_size_bytes": 0,
-  "built_at": ""
+  "snapshot_sha256": "1718d119594827ff9b9d20b3ac671cbe4acc0d4cb10c3607133fe0168cbf01a4",
+  "snapshot_size_bytes": 1240174914,
+  "built_at": "2026-10-30T23:27:00+00:00"
  }
 }
