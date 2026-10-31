@@ -238,8 +238,8 @@ jobs:
           python3 - <<'PY'
           import hashlib, json
           i = ${{ matrix.shard }}
-          rep = json.load(open(f"shard_out/shard_report_{i}.json"))
-          h = hashlib.sha256(open(f"shard_out/shard_{i}.snapshot.gz", "rb").read()).hexdigest()
+          rep = json.load(open(f"shard-out/shard_report_{i}.json"))
+          h = hashlib.sha256(open(f"shard-out/shard_{i}.snapshot.gz", "rb").read()).hexdigest()
           assert h == rep["snapshot_sha256"], "cached snapshot does not match its own report"
           pins = json.load(open("bootstrap/pins.json"))
           assert rep["bm25_sha256"] == pins["bm25_stats"]["sha256"], \
