@@ -33,8 +33,8 @@ text, results grouped/deduplicated by headword.
 1. Pick a **release variant** (see §1b) from the GitHub Release page:
    * Linux: `Dehkhoda.RAG_<version>_amd64-full.AppImage` or
      `Dehkhoda.RAG_<version>_amd64-lean.AppImage` (plus the offline `.deb`)
-   * Windows: `dehkhoda-setup-win-<version>-full.exe` or
-     `dehkhoda-setup-win-<version>-lean.exe`
+   * Windows: `dehkhoda-setup-win-<version>-lean.exe` (Windows full is
+     deferred to v1.3.2 — see §1c)
 2. Launch **Dehkhoda RAG**. The shell picks a free port, spawns the bundled
    `dehkhoda-server` sidecar and waits for `GET /health` (up to 5 min).
 3. First run: the setup wizard walks you through خوش آمدید → بررسی سیستم →
@@ -61,19 +61,41 @@ three build flags:
 manifest is the runtime source of truth: it drives the zero-network guard
 (`bootstrap/net_guard.py`) and the index-restore branches.
 
+### v1.3.1 shipping matrix
+
+| Variant | Platform | Included | First-run time | Status |
+|---------|----------|----------|----------------|--------|
+| Linux full | Linux | model+dataset+index | < 60 s | ✅ v1.3.1 |
+| Linux lean | Linux | (downloads on first run) | 10–15 min | ✅ v1.3.1 |
+| Windows lean | Windows | (downloads on first run) | 10–15 min | ✅ v1.3.1 |
+| Windows full | Windows | model+dataset+index | 5 h+ restore (unacceptable) | ⚠️ deferred to v1.3.2 |
+
+### Why Windows full is not in v1.3.1
+
+* Snapshot restore on Windows takes hours: verified in CI (run
+  41252763218 — the Windows restore build gate ran **5 h 41 m** without
+  completing inside the 360-min job wall; the identical restore takes
+  **26 s** on Linux).
+* The correct fix requires shipping pre-extracted storage instead of a
+  snapshot to restore — a cross-platform portability redesign, not a
+  build-flag change. It is deferred to v1.3.2 for a properly tested
+  solution.
+* Windows users who need offline mode should use Linux full or wait for
+  v1.3.2 (see HANDOFF.md §13).
+
 ### Variant comparison (v1.3.1)
 
 | | **full (کاملاً آفلاین)** | **lean (سبک)** |
 |---|---|---|
 | What's inside | model + 33 gzipped SQL dumps + prebuilt Qdrant snapshot | none of the three |
-| Download size (target) | 2.2–3.2 GB AppImage / 1.8–2.8 GB exe | 450–650 MB AppImage / 400–550 MB exe |
+| Download size (target) | 2.2–3.2 GB AppImage | 450–650 MB AppImage / 400–550 MB exe |
 | Network requirement | **ZERO outbound requests after the download — forever.** Not on first launch, not on any launch, not during restore/search/error paths; the runtime socket guard hard-fails any attempt and tcpdump asserts exactly 0 packets in CI | requires internet ONLY for the first-run model + dataset download; afterwards fully offline |
 | First-run time | **< 60 s** (snapshot restore + one query; CI allows 120 s on slow filesystems) | model download (~1.1 GB, resumable) + ingestion of 312,506 entries |
 | First-run wizard step | «بازیابی ایندکس آماده» — staged restore with progress; **no download URLs exist in this UI**; record count verified against the pin | download progress (file + speed + ETA + Cancel) then resumable ingestion |
 | Future index rebuilds (new model / vector config) | fully offline via `--rebuild-index` (the raw SQL ships inside) | possible after the first-run download (dumps live in the data dir) |
 | Best for | offline machines, air-gapped fleets, unreliable networks | smaller download, machines with good connectivity |
 | Linux artifact | `Dehkhoda.RAG_<v>_x86_64-full.AppImage` (+ `.deb`, `.pkg.tar.zst`) | `Dehkhoda.RAG_<v>_x86_64-lean.AppImage` |
-| Windows artifact | `dehkhoda-setup-win-<v>-full.exe` | `dehkhoda-setup-win-<v>-lean.exe` |
+| Windows artifact | deferred to v1.3.2 (see §1c) | `dehkhoda-setup-win-<v>-lean.exe` |
 
 The dataset (~51 MB gzipped) is **not** bundled in lean — the v1.3.0
 first-run download behavior is preserved unchanged for lean, which keeps

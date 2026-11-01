@@ -340,6 +340,14 @@ top-1 alone is not the user-facing ordering.
   over the RRF top-24, re-rank before display).
 * Test with real users on real queries — collect per-query relevance
   feedback on top-3 results before locking the v1.3.2 model choice.
+* **Windows full redesign (v1.3.1 deferral)** — ship pre-extracted storage
+  (the Qdrant storage directory itself, no snapshot restore on first run);
+  investigate Qdrant cross-platform storage portability first (identical
+  restore: 26 s on Linux vs 5 h 41 m+ on Windows — §13). Requires
+  portability tests before it can gate a release.
+* Resolve the e5-base Persian antonym limitation (§10) — via model
+  re-pin (bge-m3 above), sparse weighting, or the reranker; measured on
+  the 3 SAFEGUARD-2 probes plus real-user queries.
 
 ## 12. Why Qdrant snapshot shas are non-deterministic (v1.3.1 release-train root cause)
 
@@ -385,3 +393,65 @@ Future patch releases must not depend on workflow artifact retention.
 `ci.yml` Tauri build failures are a separate non-gating workflow. Documented
 here as a known limitation; NOT fixed in the v1.3.1 release train (which
 touches release.yml only). Does not block v1.3.1 shipping.
+
+## 13. v1.3.1 scope reduction: Windows full deferred to v1.3.2
+
+Decision (release-train final): v1.3.1 ships **3 variants** — Linux full
+(AppImage + offline .deb + Arch pkg), Linux lean (AppImage), Windows lean
+(EXE). **Windows full is NOT in v1.3.1.**
+
+### The observation (run 41252763218, tag v1.3.1 @ a551af1)
+
+* The `build-windows` job reached "Build gate: SNAPSHOT RESTORE on Windows
+  (cross-platform portability)" at 23:52:43Z and produced **zero log
+  output for 5 h 41 m** until GitHub cancelled the job at the 360-min
+  default wall (`##[error]The operation was canceled.`; orphan `qdrant`
+  process terminated at cleanup). The gate's `--bundle-index` restore
+  never completed on `windows-latest`.
+* The identical restore on Linux takes **26.1 s** (same snapshot bytes,
+  same qdrant version — Test A log of the same run: `duration_ms: 26126`).
+  Even with a Defender exclusion (2-3× at best) the Windows first-run
+  restore would remain in the 1.5-3 h range on CI hardware, and tens of
+  minutes on real user disks — unacceptable UX for "download once, use
+  forever".
+* Root cause shape: `bootstrap/index_restore.py recover_snapshot(...,
+  wait=True)` is an unbounded blocking wait on qdrant's single-threaded
+  snapshot recovery; on Windows that recovery is pathologically slow
+  (NTFS + real-time AV scanning every write). The gate also redirected
+  stdout/stderr to files, so the stall was invisible until the wall.
+
+### The design problem
+
+A snapshot must be RESTORED before first use; restore cost is paid by the
+user on every fresh machine. The correct v1.3.2 design ships the
+**pre-extracted storage directory** (zero restore on first run), which is a
+cross-platform portability change (Qdrant storage layout across
+Linux/Windows) that needs its own test matrix before it can gate a release.
+It does not fit the v1.3.1 train.
+
+### Workflow steps removed from release.yml (this commit)
+
+* `build-windows`: the `model-tarball` / `index-snapshot` / `dumps-gz`
+  artifact downloads; "Stage FULL content into _internal"; "Build gate:
+  bundled model verify + real e5 dense probe (full bytes)"; the
+  SNAPSHOT-RESTORE gate (in-source comment left per the removal decision);
+  "Compile NSIS installer (FULL)"; sign/collect loops reduced to
+  `@("lean")`; artifact path list reduced to the lean exe + SHA256SUMS.txt.
+  The PyInstaller "Build sidecar (full profile)" step is UNCHANGED (one
+  backend build serves the lean installer; profile refers to the bundle
+  build, not the installer variant).
+* `release` job: job name 4→3 variants; `SHA256SUMS.all` no longer lists
+  `dehkhoda-setup-win-*-full.exe`; Persian release body: full-variant file
+  list is Linux-only, plus new sections for the Windows deferral notice,
+  the §10 quality limitation, and the v1.3.2 roadmap.
+* Acceptance matrix UNCHANGED (8 rows): the 4 full rows exercise the LINUX
+  full AppImage (built by build-linux from the merge snapshot), which still
+  ships. Windows EXE was never tested by linux-acceptance.
+
+### Run history for this tag (continues the §12 table)
+
+| Run | Trigger | Outcome |
+| --- | --- | --- |
+| 41182808425 (#42) | tag v1.3.1 @ cdd1ef2 | Option A validated in production: merge-index acquired the pinned snapshot from source_run (sha == pin), tag-scope cache saved. Lean acceptance 4/4 GREEN. Full rows hit a nonexistent image tag (IMG variant-prefix bug, Test A/C lines 847/854) — cancelled before publish; exposed the github-release gate override (`if:` without `success()`). |
+| 41252763218 (#43) | tag v1.3.1 @ a551af1 | IMG fix validated (tcpdump-prep commit and Test A/C use points matched; image found on all 4 distros). All 4 full rows failed at ONE first-execution assertion: `grep -q '"word"'` vs the actual `headword` response key — the search itself returned correct Persian results; tcpdump 0 packets / 0 DNS on all 4. Hardened `&& success()` gate HELD: github-release stayed skipped for the whole run. build-windows hit the 360-min wall inside the Windows restore gate (§13). |
+| run #44 (this commit) | tag v1.3.1 retag | Ships 3 variants. Fixes: acceptance `"word"`→`"headword"`; APP_VERSION 1.2.1→1.3.1; Windows full removed per this section. |

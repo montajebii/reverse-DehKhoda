@@ -884,11 +884,13 @@ jobs:
           retention-days: 14
 
   # ================================================== Windows installer
-  # v1.3.0: ONE PyInstaller build, TWO NSIS passes —
-  #   lean: resources staged WITHOUT the model  -> -DSUFFIX=-lean
-  #   full: model tarball extracted into _internal\models -> -DSUFFIX=-full
+  # v1.3.0: ONE PyInstaller build, TWO NSIS passes (lean + full).
+  # v1.3.1: ONE PyInstaller build, ONE NSIS pass — LEAN ONLY (Windows full
+  #   deferred to v1.3.2: snapshot restore takes 5h+ on Windows, see
+  #   HANDOFF.md SS13). The backend build is unchanged (full profile serves
+  #   the lean installer; lean differs only in NSIS staging).
   build-windows:
-    name: installer (windows, full + lean)
+    name: installer (windows, lean)
     runs-on: windows-latest
     needs: [model-cache, merge-index]
     steps:
@@ -900,18 +902,9 @@ jobs:
         with:
           node-version: "20"
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/download-artifact@v4
-        with:
-          name: model-tarball
-          path: .
-      - uses: actions/download-artifact@v4
-        with:
-          name: index-snapshot
-          path: .
-      - uses: actions/download-artifact@v4
-        with:
-          name: dumps-gz
-          path: .
+      # v1.3.1 scope: LEAN ONLY. The model-tarball / index-snapshot /
+      # dumps-gz artifact downloads were consumed exclusively by the Windows
+      # full staging (removed with the variant) — lean bundles none of them.
       - name: Build sidecar (full profile)
         shell: bash
         run: |
@@ -985,57 +978,9 @@ jobs:
             -DQDRANT_DIR="$PWD/desktop/src-tauri/resources/sidecars/qdrant" `
             -DVERSION="${{ env.VERSION }}" -DSUFFIX="-lean" `
             installer/windows/nsis.nsi
-      - name: Stage FULL content into _internal (model + dataset + snapshot)
-        shell: bash
-        run: |
-          set -e
-          REV=$(python -c "import json;print(json.load(open('bootstrap/pins.json'))['embedding_model']['revision'])")
-          SHA_PIN=$(python -c "import json;print(json.load(open('bootstrap/pins.json'))['prebuilt_index']['snapshot_sha256'])")
-          test -n "$SHA_PIN" || { echo 'FATAL: pins.prebuilt_index.snapshot_sha256 empty — CI snapshot job must run first'; exit 1; }
-          mkdir -p desktop/src-tauri/resources/dehkhoda-server/_internal
-          tar -xzf model-e5.tar.gz -C desktop/src-tauri/resources/dehkhoda-server/_internal
-          test -f "desktop/src-tauri/resources/dehkhoda-server/_internal/models/$REV/model.safetensors"
-          echo "staged bundled model (revision $REV)"
-          # v1.3.1: dataset (33 pinned dumps) + prebuilt snapshot + manifest
-          tar -xzf dumps.tar.gz -C desktop/src-tauri/resources/dehkhoda-server/_internal
-          N=$(find desktop/src-tauri/resources/dehkhoda-server/_internal/dumps -name '*.sql.gz' | wc -l)
-          test "$N" = "33" || { echo "FATAL: expected 33 dumps, found $N"; exit 1; }
-          mkdir -p desktop/src-tauri/resources/dehkhoda-server/_internal/index
-          cp dehkhoda.snapshot.gz desktop/src-tauri/resources/dehkhoda-server/_internal/index/dehkhoda.snapshot.gz
-          ACTUAL=$(sha256sum desktop/src-tauri/resources/dehkhoda-server/_internal/index/dehkhoda.snapshot.gz | awk '{print $1}')
-          test "$ACTUAL" = "$SHA_PIN" || { echo "FATAL: snapshot sha mismatch: $ACTUAL != $SHA_PIN"; exit 1; }
-          # v1.3.1 Option C: corpus-wide BM25 stats beside the snapshot
-          cp bm25_stats.pkl desktop/src-tauri/resources/dehkhoda-server/_internal/index/bm25_stats.pkl
-          ACTUAL_BM25=$(sha256sum desktop/src-tauri/resources/dehkhoda-server/_internal/index/bm25_stats.pkl | awk '{print $1}')
-          BM25_PIN=$(python -c "import json;print(json.load(open('bootstrap/pins.json'))['bm25_stats']['sha256'])")
-          test "$ACTUAL_BM25" = "$BM25_PIN" || { echo "FATAL: bm25 stats sha mismatch: $ACTUAL_BM25 != $BM25_PIN"; exit 1; }
-          printf '{"variant":"full","model":true,"dataset":true,"index":true}\n' \
-            > desktop/src-tauri/resources/dehkhoda-server/_internal/bundle.json
-          cat desktop/src-tauri/resources/dehkhoda-server/_internal/bundle.json
-          echo "staged dataset (33 dumps) + snapshot ($ACTUAL) + full manifest"
-          # also stage into backend/dist so the build gates below exercise the
-          # exact bytes that ship inside the full installer
-          mkdir -p backend/dist/dehkhoda-server/_internal
-          tar -xzf model-e5.tar.gz -C backend/dist/dehkhoda-server/_internal
-          tar -xzf dumps.tar.gz -C backend/dist/dehkhoda-server/_internal
-          mkdir -p backend/dist/dehkhoda-server/_internal/index
-          cp dehkhoda.snapshot.gz backend/dist/dehkhoda-server/_internal/index/dehkhoda.snapshot.gz
-          printf '{"variant":"full","model":true,"dataset":true,"index":true}\n' \
-            > backend/dist/dehkhoda-server/_internal/bundle.json
-      - name: "Build gate: bundled model verify + real e5 dense probe (full bytes)"
-        shell: bash
-        run: |
-          BIN=backend/dist/dehkhoda-server/dehkhoda-server.exe
-          export DEHKHODA_DATA_DIR="$PWD/.dh-ci"
-          export PYTHONUTF8=1 PYTHONIOENCODING=utf-8   # Windows pipes default to cp1252
-          "$BIN" bootstrap --step model --check >gate-model.json 2>gate-model.err \
-            || { echo 'model --check gate FAILED:'; cat gate-model.err; exit 1; }
-          tail -1 gate-model.json | grep -q '"ok": *true' \
-            || { echo 'model --check gate not ok:'; cat gate-model.json gate-model.err; exit 1; }
-          "$BIN" bootstrap --step engine-smoke --engine dense >gate-dense.json 2>gate-dense.err \
-            || { echo 'engine-smoke dense gate FAILED:'; cat gate-dense.err; exit 1; }
-          tail -1 gate-dense.json | grep -q '"ok": *true' \
-            || { echo 'engine-smoke dense gate not ok:'; cat gate-dense.json gate-dense.err; exit 1; }
+      # Removed in v1.3.1: Windows full staging (model + 33 dumps + pinned
+      # snapshot + bm25 stats into _internal) — the Windows full variant is
+      # deferred to v1.3.2 (see HANDOFF.md SS13).
       - name: "Build gate: offline guard unit tests (zero-network closure)"
         shell: bash
         run: |
@@ -1043,34 +988,8 @@ jobs:
           python bootstrap/tests/test_net_guard.py
           python bootstrap/tests/test_pins_sync.py
           python bootstrap/tests/test_offline_guard.py
-      - name: "Build gate: SNAPSHOT RESTORE on Windows (cross-platform portability)"
-        shell: bash
-        run: |
-          BIN=backend/dist/dehkhoda-server/dehkhoda-server.exe
-          export DEHKHODA_DATA_DIR="$PWD/.dh-restore"
-          export PYTHONUTF8=1 PYTHONIOENCODING=utf-8
-          export DEHKHODA_QDRANT_BINARY="$PWD/desktop/src-tauri/resources/sidecars/qdrant/qdrant.exe"
-          "$BIN" bootstrap --step index --bundle-index >gate-restore.json 2>gate-restore.err \
-            || { echo 'index --bundle-index gate FAILED:'; cat gate-restore.err; exit 1; }
-          tail -1 gate-restore.json | grep -q '"ok": *true' \
-            || { echo 'restore gate not ok:'; cat gate-restore.json gate-restore.err; exit 1; }
-          tail -1 gate-restore.json
-          tail -1 gate-restore.json | grep -q '"mode": *"restored"' \
-            || { echo 'restore gate: dataset event mode != restored'; exit 1; }
-          "$BIN" bootstrap --step index --verify-index >gate-verify.json 2>gate-verify.err \
-            || { echo 'verify-index gate FAILED:'; cat gate-verify.err; exit 1; }
-          tail -1 gate-verify.json | grep -q '"ok": *true' \
-            || { echo 'verify-index gate not ok:'; cat gate-verify.json gate-verify.err; exit 1; }
-      - name: Compile NSIS installer (FULL)
-        shell: pwsh
-        run: |
-          $exe = (Resolve-Path "desktop/src-tauri/target/release/dehkhoda-rag.exe").Path
-          & "C:\Program Files (x86)\NSIS\makensis.exe" `
-            -DAPP_EXE="$exe" `
-            -DBACKEND_DIR="$PWD/desktop/src-tauri/resources/dehkhoda-server" `
-            -DQDRANT_DIR="$PWD/desktop/src-tauri/resources/sidecars/qdrant" `
-            -DVERSION="${{ env.VERSION }}" -DSUFFIX="-full" `
-            installer/windows/nsis.nsi
+      # Removed in v1.3.1: Windows snapshot restore takes 5h+ on CI, deferring
+      # to v1.3.2 redesign. Windows full variant dropped from this release.
       - name: Sign installers (if certificate secret present)
         if: env.WINDOWS_CERTIFICATE != ''
         env:
@@ -1082,7 +1001,7 @@ jobs:
           [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
           $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
             Select-Object -First 1 -ExpandProperty FullName
-          foreach ($v in @("lean", "full")) {
+          foreach ($v in @("lean")) {
             & $signtool sign /f $pfx /p "$env:WINDOWS_CERTIFICATE_PASSWORD" `
               /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
               "installer/windows/dehkhoda-setup-win-${{ env.VERSION }}-$v.exe"
@@ -1094,7 +1013,7 @@ jobs:
           New-Item -ItemType Directory -Force dist-win | Out-Null
           # NSIS writes OutFile next to the .nsi script (installer/windows/).
           $failed = $false
-          foreach ($v in @("lean", "full")) {
+          foreach ($v in @("lean")) {
             $src = "installer/windows/dehkhoda-setup-win-${{ env.VERSION }}-$v.exe"
             if (-not (Test-Path $src)) { Write-Error "installer not found at $src"; $failed = $true; continue }
             Copy-Item $src dist-win/
@@ -1107,14 +1026,13 @@ jobs:
         with:
           name: dehkhoda-windows
           path: |
-            dist-win/dehkhoda-setup-win-${{ env.VERSION }}-full.exe
             dist-win/dehkhoda-setup-win-${{ env.VERSION }}-lean.exe
             dist-win/SHA256SUMS.txt
           retention-days: 14
 
   # ================================================== GitHub Release
   release:
-    name: github-release (4 variants + SHA256SUMS.all)
+    name: github-release (3 variants + SHA256SUMS.all)
     needs: [container-tests, windows-bootstrap, model-cache, merge-index,
             build-linux, linux-acceptance, build-windows]
     if: startsWith(github.ref, 'refs/tags/v') && success()
@@ -1146,7 +1064,6 @@ jobs:
             ./Dehkhoda.RAG_*-lean.AppImage \
             ./*.deb \
             ./*.pkg.tar.zst \
-            ./dehkhoda-setup-win-*-full.exe \
             ./dehkhoda-setup-win-*-lean.exe \
             > SHA256SUMS.all
           cat SHA256SUMS.all
@@ -1179,7 +1096,7 @@ jobs:
           دو نسخه از همین برنامه منتشر شده است — هر دو از یک کد، با یک پرچم ساخت:
 
           ## نسخهٔ کامل (کاملاً آفلاین) — شامل مدل، داده‌ها و ایندکس آماده؛ حدود ${FULL_MB} مگابایت
-          * فایل‌ها: \`Dehkhoda.RAG_*-full.AppImage\` (لینوکس)، \`dehkhoda-setup-win-*-full.exe\` (ویندوز)
+          * فایل‌ها: \`Dehkhoda.RAG_*-full.AppImage\` (لینوکس)؛ بسته‌های توزیع \`*.deb\` و \`*.pkg.tar.zst\` هم از همین نسخهٔ کامل‌اند
           * مدل زبانی + ۳۳ فایل دادهٔ دهخدا + ایندکس آمادهٔ Qdrant داخل بسته است
           * پس از دانلود، **هیچ اتصال اینترنتی لازم نیست — حتی یک بستهٔ شبکه هم ارسال نمی‌شود**
           * اولین اجرا با بازیابی ایندکس آماده در کمتر از یک دقیقه به «آماده» می‌رسد
@@ -1191,6 +1108,15 @@ jobs:
           * در اولین اجرا، مدل زبانی حدود **${MODEL_MB} مگابایت** از huggingface.co دانلود می‌شود
             (با نوار پیشرفت، سرعت، زمان باقی‌مانده، امکان لغو و ادامهٔ دانلود از همان‌جا)
           * بعد از همان دانلود اولیه، برنامه کاملاً آفلاین است؛ اگر اینترنت ندارید، نسخهٔ کامل را برگزینید
+
+          ## نسخهٔ کامل ویندوز — به نسخهٔ ۱.۳.۲ موکول شد
+          * ویندوز در این نگارش فقط نسخهٔ سبک دارد: \`dehkhoda-setup-win-*-lean.exe\`
+          * علت: بازیابی ایندکس آماده در ویندوز بسیار کند است — در CI بیش از ۵ ساعت بدون پایان (همان عملیات روی لینوکس ۲۶ ثانیه). راه‌حل درست، عرضهٔ ایندکسِ از پیش استخراج‌شده به‌جای بازیابی اسنپ‌شات است و به آزمایش میان‌سکویی دقیق نیاز دارد
+          * کاربران ویندوز که حالت کاملاً آفلاین می‌خواهند: تا v1.3.2 منتظر بمانید
+
+          ## محدودیت‌های کیفی شناخته‌شده و برنامهٔ v1.3.2
+          * مدل e5-base در برخی جست‌وجوهای وارون فارسی (متضادها) ضعف دارد؛ رتبه‌بندی نهایی ترکیبی (BM25+RRF) این ضعف را تا حد زیادی جبران می‌کند — جزئیات: HANDOFF.md §10
+          * نقشهٔ v1.3.2: نسخهٔ کامل ویندوز (ایندکس از پیش استخراج‌شده، بدون بازیابی) + ارزیابی bge-m3 + رتبه‌ساز مجدد فارسی
 
           ## بسته‌های توزیع
           * \`*.deb\` — دبیان/اوبونتو (نسخهٔ کامل؛ آفلاین)

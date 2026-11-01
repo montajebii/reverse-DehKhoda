@@ -34,7 +34,7 @@ from app.search.bm25 import BM25Encoder  # noqa: E402
 from app.search.hybrid import HybridSearchEngine  # noqa: E402
 from app.vector_store import backend_probe  # noqa: E402
 
-APP_VERSION = "1.2.1"
+APP_VERSION = "1.3.1"
 
 logging.basicConfig(
     level=logging.INFO,

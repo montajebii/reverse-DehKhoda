@@ -224,7 +224,7 @@ fi
 SEARCH=$(http_post "$HTTP_PORT" "/search" \
   '{"query":"احساس بی‌قراری و اضطراب","top_k":5}')
 echo "$SEARCH" | tail -1 | head -c 600; echo
-echo "$SEARCH" | grep -q '"word"' || fail "search returned no headwords"
+echo "$SEARCH" | grep -q '"headword"' || fail "search returned no headwords"
 echo "search OK (>=1 plausible headword)"
 
 # ---- UI bundle: no external URLs ----------------------------------------

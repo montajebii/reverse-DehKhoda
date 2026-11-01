@@ -80,7 +80,7 @@ No engine/UI/dataset changes (scope: packaging + model-download UX only).
 | Lean downloader | `bootstrap/model_download.py` — stdlib-only, HTTP Range resume on `<file>.partial`, per-file sha256 vs pins.json (delete → retry once → Persian error), cooperative cancel (Tauri `bootstrap_cancel`), `.ready` fast path (<100 ms) |
 | Wizard model step | pre-flight (exact size, disk ≥ 2× model, HEAD probe 5 s) → «شروع دانلود» → progress bar with file + speed + ETA → resume prompt «دانلود مدل ناقص است. ادامه می‌دهید؟» |
 | Model tarball | CI `model-cache` job — one verified download per `pins.json` hash; tarball layout `models/<revision>/…` doubles as lean-acceptance seed |
-| Release artifacts | `Dehkhoda.RAG_<v>_amd64-{full,lean}.AppImage`, `dehkhoda-setup-win-<v>-{full,lean}.exe`, one offline `.deb`, `SHA256SUMS.all` |
+| Release artifacts | v1.3.1 (3 variants): `Dehkhoda.RAG_<v>_amd64-{full,lean}.AppImage`, `dehkhoda-setup-win-<v>-lean.exe`, one offline `.deb`, Arch `.pkg.tar.zst`, `SHA256SUMS.all` (Windows full deferred to v1.3.2 — DEPLOYMENT.md §1c) |
 
 ## Deliberate non-pins
 
