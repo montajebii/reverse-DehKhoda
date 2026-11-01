@@ -191,7 +191,7 @@ jobs:
     needs: [model-cache, bm25-stats]
     # push/tag runs: inputs.skip_ingest is null -> null != true -> jobs run.
     # dispatch with skip_ingest=true: the 4-5h shard work never re-executes.
-    if: ${{ inputs.skip_ingest != true }}
+    if: ${{ success() && inputs.skip_ingest != true }}
     timeout-minutes: 330
     strategy:
       fail-fast: false
@@ -844,14 +844,14 @@ jobs:
       - name: "Test A — full offline acceptance (network NONE, tcpdump == 0 packets): ${{ matrix.image }}"
         if: matrix.variant == 'full'
         run: |
-          IMG=dh-acc:$(echo '${{ matrix.image }}' | tr ':.' '--')
+          IMG=dh-acc:${{ matrix.variant }}-$(echo '${{ matrix.image }}' | tr ':.' '--')
           docker run --rm --network none -v "$PWD":/repo \
             $IMG \
             bash /repo/bootstrap/tests/full_offline_acceptance.sh /repo
       - name: "Test C — rebuild index offline from bundled SQL (network NONE): ${{ matrix.image }}"
         if: matrix.variant == 'full'
         run: |
-          IMG=dh-acc:$(echo '${{ matrix.image }}' | tr ':.' '--')
+          IMG=dh-acc:${{ matrix.variant }}-$(echo '${{ matrix.image }}' | tr ':.' '--')
           docker run --rm --network none -v "$PWD":/repo \
             -e DEHKHODA_EMBEDDER=hash -e DEHKHODA_DENSE_DIM=256 \
             $IMG \
@@ -1117,7 +1117,7 @@ jobs:
     name: github-release (4 variants + SHA256SUMS.all)
     needs: [container-tests, windows-bootstrap, model-cache, merge-index,
             build-linux, linux-acceptance, build-windows]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') && success()
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
