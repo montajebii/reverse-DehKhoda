@@ -19,9 +19,10 @@
 #     4. the restored record count equals pins.prebuilt_index.record_count
 #     5. one REAL Persian hybrid search returns >= 1 plausible headword
 #     6. /health reports engine=ready and source=bundled
-#     7. the UI bundle contains no external http(s) URLs (whitelist:
-#        w3.org SVG xmlns, loopback, tauri scheme, the display-only
-#        release-page URL — see docs/NETWORK-AUDIT.md A9)
+#     7. the UI bundle contains no external http(s) URLs (scan scope: the
+#        source UI desktop/ui + loose UI files outside _internal/;
+#        whitelist: w3.org SVG xmlns, loopback, tauri scheme, the
+#        display-only release-page URL — see docs/NETWORK-AUDIT.md A9)
 #
 #   Test C (--test-c) — offline rebuild extensibility, PART 3/4:
 #     fresh install (fresh data dir), --rebuild-index with the hash
@@ -38,6 +39,7 @@ MODE="${2:---test-a}"
 cd "$REPO"
 
 fail() { echo "ACCEPTANCE FAIL: $*"; exit 1; }
+warn() { echo "ACCEPTANCE WARN: $*"; }
 
 APPIMAGE=$(ls dist-linux/*-full.AppImage 2>/dev/null | head -1 \
   || ls dist-linux/*.AppImage | head -1)
@@ -228,16 +230,44 @@ echo "$SEARCH" | grep -q '"headword"' || fail "search returned no headwords"
 echo "search OK (>=1 plausible headword)"
 
 # ---- UI bundle: no external URLs ----------------------------------------
+# v1.3.1 run-44 audit fix: the AppImage has ZERO loose UI files — frontendDist
+# is embedded in the Tauri binary — and the only URL-bearing text files were
+# _internal/ Python package templates (torch/sklearn/skrub report assets)
+# that the webview never loads (tcpdump: 0 packets). The scan therefore
+# covers the REAL user-facing surface:
+#   A. the source UI ($REPO/desktop/ui = tauri.conf.json frontendDist), and
+#   B. loose UI files (*.js/*.css/*.html/*.svg) in the AppImage tree outside
+#      _internal/ + __pycache__ (+*.pyc) — a tripwire in case packaging ever
+#      starts dropping loose UI files.
+# Raw binaries (Tauri binary, webkit/gstreamer libs under usr/lib, qdrant.gz)
+# are deliberately NOT grepped: they embed toolchain URLs the webview never
+# fetches — scanning them would trade the old false-positive class for a
+# new one.
 echo "=== UI bundle external-URL grep ==="
-URLS=$(find squashfs-root -type f \( -name '*.js' -o -name '*.css' -o -name '*.html' \) \
-  -print0 2>/dev/null | xargs -0 grep -hoE 'https?://[^"'"'"')<> ]+' 2>/dev/null \
-  | sort -u | grep -vE '^(https?://(127\.0\.0\.1|localhost|w3\.org|www\.w3\.org|tauri\.localhost|schema\.tauri\.app|github\.com/montajebii/reverse-DehKhoda))' \
-  || true)
-if [ -n "$URLS" ]; then
-  echo "$URLS"
-  fail "external URLs found in the UI bundle (see above)"
+URL_RX='https?://[^"'"'"')<> ]+'
+SCAN_TARGETS=""
+if [ -d "$REPO/desktop/ui" ]; then
+  SCAN_TARGETS="$REPO/desktop/ui"
+else
+  warn "REPO/desktop/ui not found; source-UI scan skipped"
 fi
-echo "UI bundle: no unexpected external URLs (whitelist: w3.org xmlns, loopback, tauri, display-only release URL)"
+URL_HITS=$( {
+  if [ -n "$SCAN_TARGETS" ]; then
+    grep -rhoE "$URL_RX" "$SCAN_TARGETS" 2>/dev/null || true
+  fi
+  find squashfs-root -type f \
+    -not -path '*/_internal/*' \
+    -not -path '*/__pycache__/*' \
+    -not -name '*.pyc' \
+    \( -name '*.js' -o -name '*.css' -o -name '*.html' -o -name '*.svg' \) \
+    -exec grep -hoE "$URL_RX" {} + 2>/dev/null || true
+} | sort -u | grep -vE '^(https?://(127\.0\.0\.1|localhost|w3\.org|www\.w3\.org|tauri\.localhost|schema\.tauri\.app|tauri://|schema\.org|github\.com/montajebii/reverse-DehKhoda))' \
+  || true)
+if [ -n "$URL_HITS" ]; then
+  echo "$URL_HITS"
+  fail "external URLs found in the UI bundle (excluding _internal/)"
+fi
+echo "UI bundle: no unexpected external URLs (source UI + non-internal loose UI files; whitelist: w3.org xmlns, loopback, tauri, display-only release URL)"
 
 kill "$HTTP_PID" 2>/dev/null || true
 echo
