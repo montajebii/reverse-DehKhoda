@@ -70,6 +70,11 @@ manifest is the runtime source of truth: it drives the zero-network guard
 | Windows lean | Windows | (downloads on first run) | 10–15 min | ✅ v1.3.1 |
 | Windows full | Windows | model+dataset+index | 5 h+ restore (unacceptable) | ⚠️ deferred to v1.3.2 |
 
+\* Full variant: first-run restore works. The `--rebuild-index` command
+completes successfully but leaves search returning empty results due to
+a storage-path mismatch. See HANDOFF §14. Fix planned for v1.3.2. Users
+who need to rebuild should wait for v1.3.2 or use lean variant.
+
 ### Why Windows full is not in v1.3.1
 
 * Snapshot restore on Windows takes hours: verified in CI (run
@@ -92,7 +97,7 @@ manifest is the runtime source of truth: it drives the zero-network guard
 | Network requirement | **ZERO outbound requests after the download — forever.** Not on first launch, not on any launch, not during restore/search/error paths; the runtime socket guard hard-fails any attempt and tcpdump asserts exactly 0 packets in CI | requires internet ONLY for the first-run model + dataset download; afterwards fully offline |
 | First-run time | **< 60 s** (snapshot restore + one query; CI allows 120 s on slow filesystems) | model download (~1.1 GB, resumable) + ingestion of 312,506 entries |
 | First-run wizard step | «بازیابی ایندکس آماده» — staged restore with progress; **no download URLs exist in this UI**; record count verified against the pin | download progress (file + speed + ETA + Cancel) then resumable ingestion |
-| Future index rebuilds (new model / vector config) | fully offline via `--rebuild-index` (the raw SQL ships inside) | possible after the first-run download (dumps live in the data dir) |
+| Future index rebuilds (new model / vector config) | fully offline via `--rebuild-index` (the raw SQL ships inside) — **broken in v1.3.1**: rebuild completes but search returns empty (storage-path mismatch, HANDOFF §14); fix in v1.3.2 | possible after the first-run download (dumps live in the data dir) |
 | Best for | offline machines, air-gapped fleets, unreliable networks | smaller download, machines with good connectivity |
 | Linux artifact | `Dehkhoda.RAG_<v>_x86_64-full.AppImage` (+ `.deb`, `.pkg.tar.zst`) | `Dehkhoda.RAG_<v>_x86_64-lean.AppImage` |
 | Windows artifact | deferred to v1.3.2 (see §1c) | `dehkhoda-setup-win-<v>-lean.exe` |
