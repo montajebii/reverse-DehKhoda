@@ -108,6 +108,7 @@ const REASON_FA = {
   qdrant_native_fallback_offer: "پیشنهاد موتور جایگزین Qdrant",
   musl_not_supported: "توزیع‌های musl پشتیبانی نمی‌شوند",
   no_qdrant_windows_arm64: "برای ویندوز ARM64 موتور جایگزینی موجود نیست",
+  distro_family_unknown_compat: "توزیع شما در فهرست پشتیبانی شناسایی نشد — ادامه با حالت سازگاری (بدون تضمین)",
 };
 
 /* ---------------- Persian quantity helpers ---------------- */
@@ -262,6 +263,7 @@ async function renderSystem() {
     card.className = "wcard error-card";
     card.appendChild(el("h3", null, "بررسی سیستم ناموفق بود"));
     card.appendChild(el("p", null, esc(res.error_fa || "خطای نامشخص")));
+    if (res.detail) card.appendChild(el("p", null, esc(String(res.detail))));
     $panelActions.append(button("تلاش مجدد", "btn-primary", renderSystem));
     setStatus("err", "بررسی ناموفق");
     return;
@@ -293,6 +295,27 @@ async function renderSystem() {
       `<span class="c-icon"></span><span class="c-label" style="color:var(--muted);font-size:12.5px">
        ${esc(REASON_FA[reason] || reason)}</span>`));
   });
+
+  // Unsupported distro — exact ID/ID_LIKE + user-choice compat mode.
+  // The self-contained Qdrant engine needs nothing from the distro, so the
+  // wizard lets the user continue (unsafe but explicit) and logs the trace.
+  if (r.os.type === "linux" && r.os.unsupported) {
+    const seen = r.os.os_release_seen || {};
+    const idTxt = seen.ID || "(خالی)";
+    const likeTxt = (seen.ID_LIKE || "(خالی)");
+    const prettyTxt = seen.PRETTY_NAME || r.os.pretty || "";
+    const traceTxt = (r.os.detect_trace || []).join(" • ");
+    const uc = el("div", "wcard error-card");
+    uc.appendChild(el("h3", null, "توزیع لینوکس شما در فهرست پشتیبانی شناسایی نشد"));
+    uc.appendChild(el("p", null,
+      `سیستم شناسایی‌شده: ${esc(prettyTxt)} — ID=${esc(idTxt)}، ID_LIKE=${esc(likeTxt)}. ` +
+      "موتور پیش‌فرض (Qdrant) به هیچ بستهٔ سیستمی نیاز ندارد و احتمالاً کار می‌کند، " +
+      "اما برای این توزیع تست نشده است (حالت سازگاری، بدون تضمین). جزئیات در logs/backend.log ثبت می‌شود."));
+    if (traceTxt) uc.appendChild(el("p", null, esc(traceTxt)));
+    uc.appendChild(button("ادامه با حالت سازگاری (Arch compatibility mode)", "btn-primary",
+      async () => { await advanceFromSystem(); }));
+    $panelBody.appendChild(uc);
+  }
 
   // Advanced engine chooser — Milvus via Docker is OPTIONAL (spec v1.2.1).
   const advanced = be.advanced || [];
