@@ -89,6 +89,8 @@ snapshot in the same release.
 | `dee8667` | zero-network closure: HF offline env + `local_files_only`, socket guard with the Persian fail-safe, dataset URL pinned to the immutable commit (was unpinned `master`), @font-face for the bundled Vazirmatn, NETWORK-AUDIT.md |
 | `fdd5dff` | prebuilt snapshot restore + offline rebuild + `build-index-snapshot` CI job (production ingestion once per release, pin verify-or-define) + size gates + published-asset parity check |
 | `a0fa00f` | three-behavior wizard dictionary step + Test A/Test C offline acceptance (tcpdump == 0 on 4 distros) + `/health engine/source` contract |
+| `e584d07` | `app.withGlobalTauri: true` — v1.3.1-hotfix: wizard hang at step 2 (`no backend bridge`); the shipped v1.3.1 AppImage was built from `33e6d1d` (predates this), so it stayed broken |
+| `20b8a84` | v1.3.1-hotfix2 Fix E + Fix F: lazy IPC bridge resolution (50 ms poll, 2 s cap; v2/v1/internals surfaces) for the WebKitGTK late-injection race + self-diagnosing bridge-error card (bridge globals, flavor, userAgent, location into «جزئیات فنی»); vm-sandboxed regression tests in `desktop/ui/tests/` |
 
 *(fill further rows as CI runs; every fix lands with its real commit sha
 and a one-line reason — same rule as v1.3.0.)*
