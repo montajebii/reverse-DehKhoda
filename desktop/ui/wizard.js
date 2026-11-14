@@ -52,17 +52,46 @@ function setStatus(kind, text) {
   $statusText.textContent = text;
 }
 /* error cards: Persian summary + exact technical reason (collapsible) */
+function technicalDetails(technical) {
+  const det = el("details", "hit-details");
+  det.appendChild(el("summary", null, "جزئیات فنی خطا"));
+  det.appendChild(el("div", "hit-full", esc(String(technical))));
+  return det;
+}
 function errorCard(title, faMsg, technical) {
   const c = el("div", "wcard error-card");
   c.appendChild(el("h3", null, title));
   c.appendChild(el("p", null, faMsg || ""));
-  if (technical) {
-    const det = el("details", "hit-details");
-    det.appendChild(el("summary", null, "جزئیات فنی خطا"));
-    det.appendChild(el("div", "hit-full", esc(String(technical))));
-    c.appendChild(det);
-  }
+  if (technical) c.appendChild(technicalDetails(technical));
   return c;
+}
+/* v1.3.1-hotfix2 Fix F — self-diagnosing bridge-failure card.
+ * The wizard cannot work without the Tauri IPC bridge; when it is missing
+ * (withGlobalTauri off, page opened outside the shell, or WebKitGTK injected
+ * late), capture the environment — bridge globals, resolved flavor,
+ * userAgent, location — so the «جزئیات فنی» panel shows WHY instead of a
+ * generic hang at Step 2. */
+function collectBridgeDiagnostics() {
+  const ua = (navigator && navigator.userAgent) ? navigator.userAgent : "(unknown)";
+  const loc = (window.location && window.location.href) ? window.location.href : "(unknown)";
+  return [
+    "bridge diagnostics:",
+    "  __TAURI__ present: " + !!window.__TAURI__,
+    "  __TAURI_INTERNALS__ present: " + !!window.__TAURI_INTERNALS__,
+    "  WizardBridge bridgeFlavor: " + (B && B.bridgeFlavor !== undefined ? B.bridgeFlavor : "(n/a)"),
+    "  userAgent: " + ua,
+    "  location: " + loc,
+  ].join("\n");
+}
+function bridgeErrorCard(title, context, err) {
+  const diag = (err && err.diagnostics) ? String(err.diagnostics) : collectBridgeDiagnostics();
+  const technical = (context ? context + "\n" : "") + diag;
+  // log-output lives outside panel-body (the «جزئیات فنی» <details>), so it
+  // survives clearPanel()/re-renders — always stream the diagnostics there.
+  log(technical);
+  return errorCard(title,
+    "اتصال به پوستهٔ برنامه (Tauri IPC) برقرار نشد — اطلاعات عیب‌یابی در «جزئیات فنی» آمده است.",
+    technical);
 }
 function markStep(n, status) {
   const node = document.querySelector(`.step[data-step="${n}"]`);
@@ -228,8 +257,11 @@ function renderWelcome() {
 }
 
 function cancelWizard() {
-  if (B.isTauri && window.__TAURI__.window) {
-    window.__TAURI__.window.getCurrentWindow().close();
+  // Lazy access — with the internals-only flavor (or mock) window.__TAURI__
+  // may be absent; never throw from the cancel path.
+  const w = window.__TAURI__ && window.__TAURI__.window;
+  if (B.isTauri && w && typeof w.getCurrentWindow === "function") {
+    w.getCurrentWindow().close();
   } else {
     setStatus("off", "لغو شد (نمونهٔ نمایشی)");
   }
@@ -263,7 +295,15 @@ async function renderSystem() {
     card.className = "wcard error-card";
     card.appendChild(el("h3", null, "بررسی سیستم ناموفق بود"));
     card.appendChild(el("p", null, esc(res.error_fa || "خطای نامشخص")));
-    if (res.detail) card.appendChild(el("p", null, esc(String(res.detail))));
+    if (res.detail) {
+      if (res.error_code === "bridge") {
+        // Fix F: bridge failures carry the full diagnostics blob — render
+        // them in the collapsible technical panel, not as one long <p>.
+        card.appendChild(technicalDetails(String(res.detail)));
+      } else {
+        card.appendChild(el("p", null, esc(String(res.detail))));
+      }
+    }
     $panelActions.append(button("تلاش مجدد", "btn-primary", renderSystem));
     setStatus("err", "بررسی ناموفق");
     return;
@@ -951,6 +991,9 @@ async function boot() {
     if (st && typeof st === "object" && st.steps !== undefined) S.state = st;
   } catch (e) {
     log("setup_state unavailable: " + e.message);
+    // Fix F: self-diagnosing card + diagnostics streamed into «جزئیات فنی»
+    bridgeErrorCard("اتصال به پوستهٔ برنامه برقرار نشد",
+      "setup_state unavailable: " + (e && e.message ? e.message : String(e)), e);
   }
   markAllFromState();
 
