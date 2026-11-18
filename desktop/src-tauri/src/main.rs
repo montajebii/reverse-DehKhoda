@@ -366,18 +366,13 @@ fn run_bootstrap_blocking(
     let stdout = child.stdout.take();
     *state.boot_child.lock().unwrap() = Some(child);
 
-    let mut final_line = json_err("no result event emitted");
-    if let Some(out) = stdout {
-        let reader = BufReader::new(out);
-        for line in reader.lines().map_while(Result::ok) {
-            let is_result = line.contains("\"t\":\"result\"");
-            let payload = line.clone();
-            let _ = app.emit("wizard-event", payload);
-            if is_result {
-                final_line = line;
-            }
-        }
-    }
+    let outcome = if let Some(out) = stdout {
+        pump_sidecar(BufReader::new(out), |line| {
+            let _ = app.emit("wizard-event", line.to_string());
+        })
+    } else {
+        PumpOutcome::default()
+    };
     // reap the child (bootstrap_cancel may have taken it already)
     let taken = state.boot_child.lock().unwrap().take();
     if let Some(mut c) = taken {
@@ -386,13 +381,99 @@ fn run_bootstrap_blocking(
     if *state.boot_cancelled.lock().unwrap() {
         return json_cancelled();
     }
-    final_line
+    if let Some(line) = outcome.final_result {
+        return line;
+    }
+    // No terminal result event — diagnose precisely instead of a bare
+    // generic error (read errors, last streamed line).
+    let mut detail = String::from("sidecar ended without a result event");
+    if let Some(e) = outcome.read_error {
+        detail += &format!("; stdout read error: {e}");
+    }
+    if let Some(l) = outcome.last_line {
+        detail += &format!("; last line: {l}");
+    }
+    json_err(&detail)
 }
 
 fn json_err(msg: &str) -> String {
     serde_json::json!({"t": "result", "ok": false, "error_code": "shell",
                        "error_fa": "خطای پوستهٔ برنامه", "detail": msg})
         .to_string()
+}
+
+// ---------------------------------------------------------------------------
+// v1.3.1-hotfix3 (Fix G): sidecar stdout pump.
+//
+// Two defects fixed here:
+//   1. The old terminal-line check `line.contains("\"t\":\"result\"")` could
+//      NEVER match: bootstrap/events.py emits with json.dumps' default
+//      separators, so the real line is `{"t": "result", ...}` (space after
+//      the colon). Every wizard step therefore ended as "no result event
+//      emitted" even when the sidecar succeeded. Matching now parses each
+//      line as JSON and compares the top-level "t" field — spacing-proof.
+//   2. The old `for line in reader.lines().map_while(Result::ok)` loop
+//      SILENTLY stopped reading on any I/O error (e.g. invalid UTF-8) and
+//      dropped the pipe while the Python child was still writing — the
+//      child then died with BrokenPipeError (observed in backend.log on
+//      Parch). The pump now captures read errors explicitly and DRAINS the
+//      pipe to EOF (forwarding residual bytes lossily) before returning, so
+//      the read end always outlives the writer.
+// ---------------------------------------------------------------------------
+#[derive(Default)]
+struct PumpOutcome {
+    final_result: Option<String>,
+    last_line: Option<String>,
+    read_error: Option<std::io::Error>,
+}
+
+fn is_result_line(line: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(line)
+        .map(|v| v.get("t").and_then(|t| t.as_str()) == Some("result"))
+        .unwrap_or(false)
+}
+
+fn pump_sidecar<R: Read>(mut reader: BufReader<R>, mut on_line: impl FnMut(&str)) -> PumpOutcome {
+    let mut out = PumpOutcome::default();
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) => break, // EOF
+            Ok(_) => {
+                while buf.last() == Some(&b'\n') || buf.last() == Some(&b'\r') {
+                    buf.pop();
+                }
+                let line = String::from_utf8_lossy(&buf).into_owned();
+                let is_result = is_result_line(&line);
+                on_line(&line);
+                if is_result {
+                    out.final_result = Some(line.clone());
+                }
+                out.last_line = Some(line);
+            }
+            Err(e) => {
+                out.read_error = Some(e);
+                // Forward whatever bytes the failed read left behind...
+                if !buf.is_empty() {
+                    let line = String::from_utf8_lossy(&buf).into_owned();
+                    on_line(&line);
+                }
+                // ...then DRAIN to EOF so the child never writes into a
+                // closed pipe; residual bytes are forwarded lossily.
+                let mut rest = Vec::new();
+                let _ = reader.read_to_end(&mut rest);
+                if !rest.is_empty() {
+                    let lossy = String::from_utf8_lossy(&rest);
+                    for l in lossy.lines() {
+                        on_line(l);
+                    }
+                }
+                break;
+            }
+        }
+    }
+    out
 }
 
 fn json_cancelled() -> String {
@@ -493,4 +574,64 @@ fn main() {
                 kill_child(&app_handle.state::<SidecarState>());
             }
         });
+}
+
+#[cfg(test)]
+mod pump_tests {
+    use super::*;
+
+    /// Fix G regression: events.py emits with json.dumps' DEFAULT
+    /// separators ("t": "result" — space after the colon). The old
+    /// contains("\"t\":\"result\"") check could never match.
+    #[test]
+    fn result_line_with_default_json_separators_matches() {
+        let line = r#"{"t": "result", "step": "system", "ok": true, "data": {}}"#;
+        assert!(is_result_line(line));
+    }
+
+    #[test]
+    fn result_line_compact_separators_also_match() {
+        assert!(is_result_line(r#"{"t":"result","ok":true}"#));
+    }
+
+    #[test]
+    fn non_result_lines_do_not_match() {
+        assert!(!is_result_line(r#"{"t": "hello", "step": "report"}"#));
+        assert!(!is_result_line(r#"{"t": "progress", "pct": 50}"#));
+        assert!(!is_result_line("not json at all"));
+    }
+
+    #[test]
+    fn pump_streams_all_lines_and_captures_the_terminal_result() {
+        let input = "{\"t\": \"hello\"}\n{\"t\": \"progress\", \"pct\": 5}\n"
+            .to_owned()
+            + &format!("{{\"t\": \"result\", \"ok\": true}}\n");
+        let got = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let g2 = got.clone();
+        let outcome = pump_sidecar(BufReader::new(input.as_bytes()), move |l| {
+            g2.lock().unwrap().push(l.to_string());
+        });
+        assert_eq!(got.lock().unwrap().len(), 3);
+        assert!(outcome.final_result.unwrap().contains("result"));
+        assert!(outcome.read_error.is_none());
+    }
+
+    /// Fix G regression: invalid UTF-8 in the stream must never abort the
+    /// pump (the old map_while(Result::ok) loop silently stopped and closed
+    /// the pipe → child died with BrokenPipeError). Byte-level reading +
+    /// lossy conversion keeps the stream alive until EOF.
+    #[test]
+    fn pump_survives_invalid_utf8_and_reaches_eof() {
+        let mut input = b"{\"t\": \"hello\"}\n".to_vec();
+        input.extend_from_slice(&[0xFF, 0xFE, b'\n']); // invalid UTF-8 line
+        input.extend_from_slice(b"{\"t\": \"result\", \"ok\": true}\n");
+        let got = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let g2 = got.clone();
+        let outcome = pump_sidecar(BufReader::new(&input[..]), move |l| {
+            g2.lock().unwrap().push(l.to_string());
+        });
+        assert!(outcome.read_error.is_none());
+        assert!(outcome.final_result.is_some());
+        assert_eq!(got.lock().unwrap().len(), 3);
+    }
 }

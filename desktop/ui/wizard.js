@@ -161,6 +161,14 @@ let liveProgress = null; // {fill, task, pct, dlLine}
 
 B.onWizardEvent((obj) => {
   if (!obj) return;
+  if (obj.t === "result") {
+    // v1.3.1-hotfix3: the shell streams every JSONL line (hello, progress,
+    // logs AND the terminal result) through wizard-event. Track the latest
+    // result here so runStep's return value can be reconciled against the
+    // stream — a shell-level timeout must never mask a real sidecar result.
+    liveResult = obj;
+    return;
+  }
   if (obj.t === "progress" || obj.t === "log") {
     if (obj.log) log(obj.log);
     if (liveProgress) {
@@ -192,8 +200,11 @@ B.onWizardEvent((obj) => {
 });
 
 /* ---------------- step runner with live UI ---------------- */
+let liveResult = null; // latest {t:"result"} seen on wizard-event (hotfix3)
+
 async function runStep(stepName, args, panel) {
   S.busy = true;
+  liveResult = null;
   if (panel) {
     const track = el("div", "progress-track");
     const fill = el("div", "progress-fill");
@@ -209,6 +220,14 @@ async function runStep(stepName, args, panel) {
   }
   try {
     const res = await B.runStep(stepName, args);
+    // v1.3.1-hotfix3: reconcile the returned value against the event stream.
+    // If the shell reports a shell-level failure but the sidecar streamed a
+    // real result (or vice versa), prefer the stream — the JSONL pipe is the
+    // source of truth (Fix G root cause: the shell's match never fired).
+    if (res && res.ok === false && res.error_code === "shell" && liveResult) {
+      log("RESULT (from event stream) " + JSON.stringify(liveResult).slice(0, 4000));
+      return liveResult;
+    }
     if (res && res.ok && res.data) log("RESULT " + JSON.stringify(res.data).slice(0, 4000));
     if (res && !res.ok) {
       (res.log_tail || []).forEach(log);
