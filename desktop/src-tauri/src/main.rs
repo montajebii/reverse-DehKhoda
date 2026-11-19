@@ -155,6 +155,44 @@ fn open_backend_log() -> std::fs::File {
         .unwrap_or_else(|e| panic!("cannot open backend log {}: {e}", path.display()))
 }
 
+/// v1.3.1-hotfix3: persistent wizard-step log (logs/wizard.log, APPEND).
+/// Every bootstrap step writes a session header, every JSONL event line,
+/// and a terminal summary (exit code, duration, read errors) so first-run
+/// failures are diagnosable from the file alone — user request: "در نسخهٔ
+/// بعد لاگینگ خیلی دقیق اضافه کن".
+fn open_wizard_log() -> std::fs::File {
+    let path = logs_dir().join("wizard.log");
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .unwrap_or_else(|e| panic!("cannot open wizard log {}: {e}", path.display()))
+}
+
+/// ISO-8601 UTC timestamp (millisecond precision) without a chrono dep —
+/// Howard Hinnant's civil-from-days algorithm.
+fn utc_now_iso() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = now.as_secs();
+    let millis = now.subsec_millis();
+    let days = (secs / 86400) as i64;
+    let rem = secs % 86400;
+    let (h, m, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mth = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if mth <= 2 { y + 1 } else { y };
+    format!("{y:04}-{mth:02}-{d:02}T{h:02}:{m:02}:{s:02}.{millis:03}Z")
+}
+
 fn spawn_cmd(bin: &std::path::Path, args: &[String], dir: Option<&std::path::Path>) -> Command {
     let mut cmd = Command::new(bin);
     cmd.args(args);
@@ -328,6 +366,7 @@ fn run_bootstrap_blocking(
     step: String,
     extra: Vec<String>,
 ) -> String {
+    let t0 = Instant::now();
     let state = app.state::<SidecarState>();
     // never run wizard steps and the HTTP server sidecar simultaneously —
     // a running sidecar is killed first (it is stateless across restarts)
@@ -358,9 +397,21 @@ fn run_bootstrap_blocking(
     }
     cmd.stdout(Stdio::piped()).stderr(Stdio::from(open_backend_log()));
 
+    let mut wlog = open_wizard_log();
+    let _ = writeln!(
+        wlog,
+        "=== [{}] step={} bin={} args={cargs:?}",
+        utc_now_iso(),
+        cargs[2],
+        bin.display()
+    );
+
     let mut child = match cmd.spawn() {
         Ok(c) => c,
-        Err(e) => return json_err(&format!("spawn: {e}")),
+        Err(e) => {
+            let _ = writeln!(wlog, "--- spawn FAILED: {e}");
+            return json_err(&format!("spawn: {e}"));
+        }
     };
     *state.boot_cancelled.lock().unwrap() = false;
     let stdout = child.stdout.take();
@@ -369,15 +420,27 @@ fn run_bootstrap_blocking(
     let outcome = if let Some(out) = stdout {
         pump_sidecar(BufReader::new(out), |line| {
             let _ = app.emit("wizard-event", line.to_string());
+            let _ = writeln!(wlog, "{line}");
         })
     } else {
         PumpOutcome::default()
     };
     // reap the child (bootstrap_cancel may have taken it already)
     let taken = state.boot_child.lock().unwrap().take();
+    let mut exit_code: Option<i32> = None;
     if let Some(mut c) = taken {
-        let _ = c.wait();
+        if let Ok(status) = c.wait() {
+            exit_code = status.code();
+        }
     }
+    let _ = writeln!(
+        wlog,
+        "--- [{}] exit_code={exit_code:?} duration={:.2}s cancelled={} read_error={:?}",
+        utc_now_iso(),
+        t0.elapsed().as_secs_f32(),
+        *state.boot_cancelled.lock().unwrap(),
+        outcome.read_error.as_ref().map(|e| e.to_string())
+    );
     if *state.boot_cancelled.lock().unwrap() {
         return json_cancelled();
     }

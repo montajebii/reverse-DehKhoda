@@ -183,7 +183,7 @@ published assets.
 
 | Platform | Path |
 |---|---|
-| Linux | `~/.local/share/dehkhoda/logs/` — `backend.log` (sidecar stdout/stderr), `qdrant.log` |
+| Linux | `~/.local/share/dehkhoda/logs/` — `backend.log` (sidecar stdout/stderr), `qdrant.log`; **v1.3.1-hotfix3**: `wizard.log` (append; per-step session header with timestamp/args, every JSONL event, exit code + duration) |
 | Windows | `%LOCALAPPDATA%\Dehkhoda\logs\` — same two files (note the capital «D») |
 
 There is **no** `wizard.log` / `model-download.log` file: wizard + download
