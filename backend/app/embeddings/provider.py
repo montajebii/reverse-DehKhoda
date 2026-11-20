@@ -16,6 +16,7 @@ import hashlib
 import logging
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -83,8 +84,22 @@ class EmbeddingProvider:
             local_only = Path(self.model_name).is_dir()
             logger.info("loading embedding model %s on %s (local_files_only=%s) ...",
                         self.model_name, self.device, local_only)
-            self._model = SentenceTransformer(self.model_name, device=self.device,
-                                              local_files_only=local_only)
+            try:
+                self._model = SentenceTransformer(self.model_name, device=self.device,
+                                                  local_files_only=local_only)
+            except Exception:
+                if self.device in ("cuda", "mps"):
+                    # v1.3.2: accelerator requested but unusable (CUDA torch
+                    # not installed, driver mismatch, OOM) — degrade to CPU
+                    # loudly instead of killing the app; the recomputed
+                    # vectors are bit-identical, only slower.
+                    logger.warning("device %s failed to load the model; "
+                                   "falling back to CPU", self.device, exc_info=True)
+                    self.device = "cpu"
+                    self._model = SentenceTransformer(self.model_name, device="cpu",
+                                                      local_files_only=local_only)
+                else:
+                    raise
         return self._model
 
     def _encode(self, texts: list[str], prefix: str,
@@ -167,7 +182,41 @@ class HashingEmbedder(EmbeddingProvider):
         return [self._embed_one(t) for t in texts]
 
 
-def get_embedder(settings, device: str = "cpu") -> EmbeddingProvider:
+def resolve_device(settings) -> str:
+    """Pick the torch device for the dense embedder (v1.3.2).
+
+    Priority:
+      1. settings.device (DEHKHODA_DEVICE): "cpu" / "cuda" / "mps" used
+         verbatim when set — power users pin explicitly.
+      2. DEHKHODA_USE_GPU=1 alias: "cuda" (or "mps" on macOS) — the
+         documented power-user switch; same env name on every platform.
+      3. "" (default): auto-detect cuda -> mps -> cpu. The bundled AppImage
+         ships CPU-only torch wheels, so auto-detect resolves to "cpu"
+         there and behavior is IDENTICAL to v1.3.1. When the user swaps in
+         CUDA torch wheels (see docs/DEPLOYMENT.md), auto-detect finds
+         cuda with zero configuration.
+    Raises nothing: any torch import/detection problem falls back to cpu.
+    """
+    pinned = (getattr(settings, "device", "") or "").strip().lower()
+    if pinned in ("cpu", "cuda", "mps"):
+        return pinned
+    try:
+        import torch  # already a hard dependency of the full profile
+
+        if sys.platform == "darwin" and torch.backends.mps.is_available():
+            return "mps"
+        if torch.cuda.is_available():
+            return "cuda"
+    except Exception:  # import failure / broken driver -> safe default
+        return "cpu"
+    return "cpu"
+
+
+def get_embedder(settings, device: Optional[str] = None) -> EmbeddingProvider:
+    """device=None (default) resolves via resolve_device(settings); an
+    explicit "cpu" keeps the historical behaviour for tests/CI."""
+    if device is None:
+        device = resolve_device(settings)
     kind = (settings.embedder or "e5-base").lower()
     if kind == "e5-base":
         # Offline desktop installs point at the bootstrap-fetched weights dir.

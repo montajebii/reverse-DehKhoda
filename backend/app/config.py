@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     embedder: str = "e5-base"
     dense_dim: int = 768
     embed_batch_size: int = 32
+    # Torch device for the dense embedder (v1.3.2): "" = auto-detect
+    # (cuda -> mps -> cpu), "cpu" forces CPU (the bundled AppImage default —
+    # CPU-only torch wheels keep the download ~2 GB smaller), "cuda" or
+    # "mps" selects an accelerator explicitly. DEHKHODA_USE_GPU=1 is an
+    # alias that maps to "cuda" (or "mps" on Apple silicon).
+    device: str = ""
     # local dir for offline model weights (bootstrap model_fetcher layout)
     model_dir: str = ""
 

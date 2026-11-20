@@ -481,9 +481,31 @@ def _probe_hybrid(client: Any, dim: int = 8) -> int:
 
 
 def launch_qdrant_local(em: Emitter) -> dict[str, Any]:
-    """Embedded qdrant-client local mode — zero external processes."""
+    """Embedded qdrant-client local mode — zero external processes.
+
+    v1.3.1-hotfix4: when the bundle ships the prebuilt SERVER-mode snapshot
+    but the native sidecar was never tried (older installs, a chain that
+    reached local mode first), starting local mode here would silently cost
+    a ~30-minute SQL rebuild for an index that could be restored in ~30 s.
+    Refuse loudly instead — the chain then goes on to try qdrant_native,
+    which is exactly what the restore needs. Lean builds and users who
+    ALREADY restored into local storage (snapshot extracted via
+    restore_local_path) are unaffected.
+    """
     from qdrant_client import QdrantClient
 
+    try:
+        snap = paths.bundled_snapshot()
+    except Exception:
+        snap = None
+    if snap is not None and \
+            os.environ.get("DEHKHODA_ALLOW_LOCAL_WITH_SNAPSHOT", "") != "1":
+        raise RuntimeError(
+            "bundled prebuilt snapshot present but the engine chain reached "
+            "qdrant_local first; local mode cannot host a server-mode "
+            "snapshot restore. The chain will now try the native qdrant "
+            "sidecar (set DEHKHODA_ALLOW_LOCAL_WITH_SNAPSHOT=1 to force "
+            "local mode anyway).")
     em.progress(task_fa="آماده‌سازی موتور داخلی Qdrant…", log="qdrant local mode")
     storage = paths.data_dir() / "qdrant"
     storage.mkdir(parents=True, exist_ok=True)
@@ -690,8 +712,16 @@ def launch(em: Emitter, preferred: Optional[str] = None,
     pref = preferred or st.get("backend") or "qdrant_native"
     chain = CHAIN.get(pref) or CHAIN["qdrant_native"]
 
-    # v1.3.1: full variant (bundled snapshot) must try the native sidecar
-    # first — restore_bundled needs server mode.
+    # v1.3.1-hotfix4: the bundled prebuilt snapshot is the STRONGEST signal
+    # — if it ships, qdrant_native MUST be tried first, regardless of the
+    # persisted backend preference. v1.3.1 bug: a user who once clicked the
+    # advanced Milvus card gets state.backend="milvus" forever, whose chain
+    # is [milvus, qdrant_local, qdrant_native, ...]; on a machine where
+    # Milvus cannot pull images (docker.io 403) the chain fell to
+    # qdrant_local BEFORE reaching qdrant_native, and the dictionary step
+    # then spent ~30 min rebuilding from SQL instead of restoring the
+    # snapshot in ~30 s (user report, Parch). The env switches remain as
+    # explicit overrides; the snapshot probe is now unconditional.
     prefer_native = (os.environ.get("DEHKHODA_PREFER_NATIVE") == "1"
                      or os.environ.get("DEHKHODA_NO_NETWORK") == "1")
     if not prefer_native:
@@ -701,8 +731,8 @@ def launch(em: Emitter, preferred: Optional[str] = None,
             prefer_native = False
     if prefer_native and chain[0] != "qdrant_native":
         chain = ["qdrant_native"] + [e for e in chain if e != "qdrant_native"]
-        em.progress(log="full variant: trying the native qdrant sidecar first "
-                        "(snapshot restore requires server mode)")
+        em.progress(log="bundled snapshot present: trying the native qdrant "
+                        "sidecar first (snapshot restore requires server mode)")
 
     attempts: list[dict] = []
     for engine in chain:

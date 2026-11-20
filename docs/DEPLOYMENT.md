@@ -299,6 +299,31 @@ fit on a deterministic 30k sample and persist to `data/bm25_stats.pkl`.
 Smoke/CI-friendly options: `{"limit": 500}` (first N staging rows),
 `{"ids": [...]}`, `{"word_filter": ["عشق", "کتاب"]}`.
 
+### 3b. GPU acceleration (optional, v1.3.2)
+
+The bundled AppImages ship **CPU-only torch wheels on purpose** — CUDA
+wheels add ~2 GB per platform. On CPU the full e5 rebuild takes
+1.5–3 h; a CUDA GPU cuts ingestion (and dense search encoding) roughly
+5–10× on typical desktop cards.
+
+Power users with an NVIDIA GPU (venv/system Python install, not the
+AppImage):
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cu124
+export DEHKHODA_USE_GPU=1        # or pin explicitly:
+export DEHKHODA_DEVICE=cuda      # "" (default) = auto: cuda -> mps -> cpu
+```
+
+Selection order (`backend/app/embeddings/provider.resolve_device`):
+`DEHKHODA_DEVICE` (verbatim cpu|cuda|mps) → `DEHKHODA_USE_GPU=1` alias
+(cuda; mps on Apple silicon) → auto-detect → cpu. If the accelerator
+fails to load the model (CUDA wheels missing, driver mismatch, OOM), the
+embedder logs a warning and falls back to CPU — vectors are identical,
+only slower. The AppImage itself ignores these flags (its torch has no
+CUDA kernels): keep the bundled build CPU-only and run a venv install for
+GPU.
+
 ---
 
 ## 4. Qdrant — the bundled default engine (all platforms)
@@ -392,7 +417,12 @@ smoke-tests both OSes and uploads installer artifacts on every push.
   `GET /health` → `engine_error` carries the full traceback and the EXACT
   missing shared library (e.g. `libgomp.so.1`), also shown in the UI's
   «جزئیات فنی» panel and in `~/.local/share/dehkhoda/logs/backend.log`
-  (`%LOCALAPPDATA%\Dehkhoda\logs\backend.log` on Windows).
+  (`%LOCALAPPDATA%\Dehkhoda\logs\backend.log` on Windows). Since
+  v1.3.1-hotfix3, `wizard.log` (same dir, APPEND) additionally records
+  every wizard step: a UTC-timestamped session header (step + args), every
+  JSONL event as streamed to the UI, and the exit code + duration —
+  attach it to bug reports; it makes first-run failures diagnosable from
+  the file alone.
 * **Milvus Lite on non-Ubuntu distros** — intentionally skipped: the wheel
   is only supported on Ubuntu >= 20.04 and is fragile when bundled. The
   Qdrant default covers every distro; the CI gate
